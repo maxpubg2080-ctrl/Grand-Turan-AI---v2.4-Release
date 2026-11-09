@@ -66,6 +66,10 @@ function getSession(userId: string | number): TelegramUserSession {
   return telegramSessions.get(userId)!;
 }
 
+// Log bot token status on startup
+console.log(`Telegram Bot Token configured: ${Boolean(botToken)}`);
+console.log(`Deploy Hook URL configured: ${Boolean(deployHookUrl)}`);
+
 // ---------------------------------------------------------------------------
 // 1. PASSPORT IMAGE PARSER API (Gemini Vision + Offline MRZ Fallback)
 // ---------------------------------------------------------------------------
@@ -364,7 +368,7 @@ app.get('/api/project-zip', async (req: Request, res: Response) => {
       const stat = fs.statSync(prebuiltZip);
       res.setHeader('Content-Type', 'application/zip');
       res.setHeader('Content-Length', stat.size);
-      res.setHeader('Content-Disposition', 'attachment; filename="Grand_Turan_AI_Full_Project_Source.zip"');
+      res.setHeader('Content-Disposition', `attachment; filename="Grand_Turan_AI_Full_Project_Source.zip"`);
       res.sendFile(prebuiltZip);
       return;
     }
@@ -378,7 +382,7 @@ app.get('/api/project-zip', async (req: Request, res: Response) => {
     });
     res.setHeader('Content-Type', 'application/zip');
     res.setHeader('Content-Length', zipContent.length);
-    res.setHeader('Content-Disposition', 'attachment; filename="Grand_Turan_AI_Full_Project_Source.zip"');
+    res.setHeader('Content-Disposition', `attachment; filename="Grand_Turan_AI_Full_Project_Source.zip"`);
     res.send(zipContent);
   } catch (error: any) {
     console.error('Error creating project ZIP:', error);
@@ -425,7 +429,7 @@ app.post('/api/telegram/webhook', async (req: Request, res: Response) => {
     if (text.startsWith('/start')) {
       const welcome = `⚜️ <b>Grand Turan — AI Pasport & Updater Bot</b>\n\n` +
         `Assalomu alaykum! Tizimga xush kelibsiz.\n` +
-        `👨💻 <b>Dasturchi:</b> Muhammad Amin\n\n` +
+        `👨‍💻 <b>Dasturchi:</b> Muhammad Amin\n\n` +
         `📸 Pasport rasmlarini yuboring (1 tadan 100 tagacha), so'ng:\n` +
         `• /flykhiva — FlyKhiva Zayafka (.xlsx) olish\n` +
         `• /prestige — Zayafka Prestige (.xlsx) olish\n` +
@@ -492,8 +496,8 @@ app.post('/api/telegram/webhook', async (req: Request, res: Response) => {
         `🧠 <b>AI Dvigateli:</b> Gemini 3.8 Flash + Offline MRZ\n` +
         `💾 <b>Baza:</b> ${scannedPassports.length} ta pasport yozilgan\n` +
         `📊 <b>Xotira:</b> ${memMb} MB\n` +
-        `👨💻 <b>Dasturchi:</b> Muhammad Amin\n` +
-        `🚀 <b>Render Deploy:</b> ${deployHookUrl ? 'Uланган' : 'Sozlanmagan'}`;
+        `👨‍💻 <b>Dasturchi:</b> Muhammad Amin\n` +
+        `🚀 <b>Render Deploy:</b> ${deployHookUrl ? 'Ulangan' : 'Sozlanmagan'}`;
       await sendTelegramReply(msg);
       res.json({ ok: true });
       return;
@@ -645,11 +649,60 @@ app.delete('/api/admin/records/:id', (req: Request, res: Response) => {
 // 6. SERVE VITE IN DEV OR STATIC IN PRODUCTION
 // ---------------------------------------------------------------------------
 async function startServer() {
+  // Allow preview host in development mode
+  const allowedHosts = process.env.NODE_ENV !== 'production' ? [
+    '0.0.0.0',
+    'localhost',
+    '127.0.0.1',
+    process.env.PREVIEW_HOST || '*.e2b.app',
+    '3000-ivzygtysq41so2bltql2k.e2b.app', // Hardcoded for preview host
+    '*.e2b.app'
+  ] : ['0.0.0.0'];
+
+  // Set express host header allowlist if needed (Vite middleware handles dev, express handles prod)
+  app.use((req, res, next) => {
+    const host = req.headers.host || '';
+    // Allow preview hosts
+    if (allowedHosts.some(h => h === '*' || host.includes(h.replace('*.', '')))) {
+      res.setHeader('Access-Control-Allow-Origin', `https://${host}`);
+      res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+      res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+      next();
+      return;
+    }
+    // Explicitly allow preview host
+    if (host.includes('e2b.app')) {
+      res.setHeader('Access-Control-Allow-Origin', `https://${host}`);
+      res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+      res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+      next();
+      return;
+    }
+    next();
+  });
+
   if (process.env.NODE_ENV !== 'production') {
     const vite = await createViteServer({
       server: {
         middlewareMode: true,
         hmr: false,
+        host: '0.0.0.0',
+        port: port,
+        strictPort: true,
+        cors: true,
+        headers: {
+          'Access-Control-Allow-Origin': '*',
+          'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
+          'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+        },
+        allowedHosts: [
+          '0.0.0.0',
+          'localhost',
+          '127.0.0.1',
+          process.env.PREVIEW_HOST || '*.e2b.app',
+          '3000-ivzygtysq41so2bltql2k.e2b.app',
+          '*.e2b.app'
+        ]
       },
       appType: 'spa',
     });
@@ -663,7 +716,8 @@ async function startServer() {
 
   httpServer.listen(port, '0.0.0.0', () => {
     console.log(`⚜️ Grand Turan AI Server running on http://0.0.0.0:${port}`);
-    console.log(`👨💻 Dasturchi: Muhammad Amin`);
+    console.log(`👨‍💻 Dasturchi: Muhammad Amin`);
+    console.log(`Allowed hosts: ${allowedHosts.join(', ')}`);
   });
 }
 
