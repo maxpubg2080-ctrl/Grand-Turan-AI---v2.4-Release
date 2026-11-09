@@ -3,15 +3,15 @@ FROM node:22-alpine AS builder
 
 WORKDIR /app
 
-# Install dependencies
-COPY package.json package-lock.json* ./
-RUN npm install
+# Copy dependency definitions and npm configuration
+COPY package.json package-lock.json* .npmrc* ./
+RUN npm install --legacy-peer-deps
 
-# Copy source and build web assets
+# Copy full source and build frontend bundle
 COPY . .
 RUN npm run build
 
-# Production runtime
+# Production runtime stage
 FROM node:22-alpine AS runner
 
 WORKDIR /app
@@ -19,10 +19,11 @@ WORKDIR /app
 ENV NODE_ENV=production
 ENV PORT=3000
 
-COPY package.json package-lock.json* ./
-RUN npm install --omit=dev
+# Install production dependencies
+COPY package.json package-lock.json* .npmrc* ./
+RUN npm install --legacy-peer-deps
 
-# Copy built frontend assets and server files
+# Copy built assets and backend
 COPY --from=builder /app/dist ./dist
 COPY --from=builder /app/server.ts ./server.ts
 COPY --from=builder /app/src ./src
@@ -30,9 +31,6 @@ COPY --from=builder /app/public ./public
 COPY --from=builder /app/tsconfig.json ./tsconfig.json
 COPY --from=builder /app/vite.config.ts ./vite.config.ts
 
-# Install tsx globally or locally to run TypeScript server
-RUN npm install -g tsx
-
 EXPOSE 3000
 
-CMD ["tsx", "server.ts"]
+CMD ["npm", "start"]

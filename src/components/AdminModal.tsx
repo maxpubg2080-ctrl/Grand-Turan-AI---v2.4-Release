@@ -477,7 +477,7 @@ git push -u origin main`}
                     <p>2. <b>New +</b> -&gt; <b>Web Service</b> -&gt; GitHub-dagi <b>grand-turan-ai</b> ni tanlang.</p>
                     <p>3. Sozlamalarni quyidagicha to'ldiring:</p>
                     <ul className="list-disc pl-5 space-y-1 font-mono text-[11px]">
-                      <li>Build Command: <code className="bg-slate-200 dark:bg-slate-700 px-1 rounded">npm install && npm run build</code></li>
+                      <li>Build Command: <code className="bg-slate-200 dark:bg-slate-700 px-1 rounded">npm install --legacy-peer-deps && npm run build</code></li>
                       <li>Start Command: <code className="bg-slate-200 dark:bg-slate-700 px-1 rounded">npm start</code></li>
                       <li>Instance: <code className="bg-slate-200 dark:bg-slate-700 px-1 rounded">Free</code></li>
                     </ul>
