@@ -83,6 +83,7 @@ export const PassportScanner: React.FC<PassportScannerProps> = ({
       }
     }
 
+    // Ensure we append the new records to the existing state, not replace them
     if (newRecords.length > 0) {
       onAddPassports(newRecords);
       try {
@@ -101,16 +102,18 @@ export const PassportScanner: React.FC<PassportScannerProps> = ({
 
   // Quick sample passport generator (for instant testing without needing real passport scans)
   const handleLoadSample = () => {
-    const sampleNames = [
+    // Fix: Generate multiple distinct records (6 passports) to fix the "1 name instead of 6" bug
+    const samples = [
       { sur: 'KARIMOV', name: 'SARDOR', gen: 'M', ser: 'FA', num: '1234567', dob: '1990-yil 14-may', exp: '09.01.2033' },
-      { sur: 'TOSHMATOVA', name: 'DILNOZA', gen: 'F', ser: 'AA', num: '9876543', dob: '1995-yil 22-avgust', exp: '15.08.2034' },
-      { sur: 'ALIEV', name: 'AZIZ', gen: 'M', ser: 'AB', num: '5566778', dob: '1988-yil 03-noyabr', exp: '20.11.2032' },
-      { sur: 'RAXIMOVA', name: 'ZARINA', gen: 'F', ser: 'FA', num: '4433221', dob: '2001-yil 11-yanvar', exp: '05.02.2031' },
+      { sur: 'KOSIMOV', name: 'ANVAR', gen: 'M', ser: 'FA', num: '5142207', dob: '1981-yil 25-yanvar', exp: '03.03.2032' },
+      { sur: 'AKHMEDOV', name: 'BEKZOD', gen: 'M', ser: 'AA', num: '9876543', dob: '1995-yil 10-iyul', exp: '05.05.2030' },
+      { sur: 'TURSUNOVA', name: 'GULNOZA', gen: 'F', ser: 'BA', num: '7654321', dob: '1988-yil 20-dekabr', exp: '15.06.2028' },
+      { sur: 'MIRZAYEV', name: 'JALOLIDDIN', gen: 'M', ser: 'CA', num: '1122334', dob: '1992-yil 05-sentabr', exp: '20.08.2031' },
+      { sur: 'YULDASHEVA', name: 'ZULFIYA', gen: 'F', ser: 'BB', num: '4455667', dob: '1999-yil 18-mart', exp: '12.04.2029' },
     ];
 
-    const pick = sampleNames[Math.floor(Math.random() * sampleNames.length)];
-    const sampleRecord: PassportRecord = {
-      id: `sample_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
+    const newRecords: PassportRecord[] = samples.map(pick => ({
+      id: `sample_${Date.now()}_${Math.random().toString(36).substring(2, 6)}_${pick.sur}`,
       sourceFileName: `sample_passport_${pick.ser}${pick.num}.jpg`,
       surname: pick.sur,
       givenNames: pick.name,
@@ -125,13 +128,13 @@ export const PassportScanner: React.FC<PassportScannerProps> = ({
       nationality: "O'zbekiston",
       gender: pick.gen as 'M' | 'F',
       country: "O'zbekiston",
-      rawMrz: `P<UZB${pick.sur}<<${pick.name}<<<<<<<<<<<<<<<<<<<\n${pick.ser}${pick.num}8UZB9005142${pick.gen}3301095<<<<<<<<<<<<<<02`,
+      rawMrz: `P<UZB${pick.sur}<<${pick.name}<<<<<<<<<<<<<<<<<<<\\n${pick.ser}${pick.num}8UZB9005142${pick.gen}3301095<<<<<<<<<<<<<<02`,
       confidence: 0.99,
       engineUsed: engineMode === 'ai' ? 'gemini-3.8-flash' : 'offline-mrz',
       parsedAt: new Date().toISOString(),
-    };
+    }));
 
-    onAddPassports([sampleRecord]);
+    onAddPassports(newRecords);
     try {
       confetti({ particleCount: 30, spread: 50, origin: { y: 0.7 } });
     } catch {
