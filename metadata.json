@@ -1,0 +1,6 @@
+{
+  "name": "Grand Turan AI — Pasport & Excel Studio",
+  "description": "Professional sun'iy intellekt va OCR pasport tahlili, Prestige va FlyKhiva Excel eksporti, Telegram bot integratsiyasi va PWA tizimi.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

@@ -1,0 +1,36 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#091428"/>
+      <stop offset="50%" stop-color="#0a2540"/>
+      <stop offset="100%" stop-color="#051020"/>
+    </linearGradient>
+    <linearGradient id="gold" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#fcd34d"/>
+      <stop offset="50%" stop-color="#f59e0b"/>
+      <stop offset="100%" stop-color="#d97706"/>
+    </linearGradient>
+    <linearGradient id="cyan" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#38bdf8"/>
+      <stop offset="100%" stop-color="#0284c7"/>
+    </linearGradient>
+  </defs>
+  <rect width="512" height="512" rx="110" fill="url(#bg)"/>
+  <rect width="504" height="504" x="4" y="4" rx="106" fill="none" stroke="url(#gold)" stroke-width="4" opacity="0.6"/>
+  <!-- Turan Golden Crest -->
+  <g transform="translate(256, 230) scale(1.1)">
+    <!-- Wings / Falcon of Grand Turan -->
+    <path d="M -130,-40 C -80,-100 -20,-110 0,-140 C 20,-110 80,-100 130,-40 C 90,-20 50,-10 0,20 C -50,-10 -90,-20 -130,-40 Z" fill="url(#gold)" opacity="0.95"/>
+    <path d="M -100,-20 C -60,-70 -10,-80 0,-100 C 10,-80 60,-70 100,-20 C 70,-5 40,0 0,25 C -40,0 -70,-5 -100,-20 Z" fill="#ffffff" opacity="0.2"/>
+    <!-- Central Passport Shield -->
+    <path d="M -45,-30 L 45,-30 C 45,-30 48,35 0,75 C -48,35 -45,-30 -45,-30 Z" fill="url(#cyan)" opacity="0.9"/>
+    <path d="M -35,-20 L 35,-20 C 35,-20 38,30 0,60 C -38,30 -35,-20 -35,-20 Z" fill="#091428"/>
+    <!-- AI Sparkle & Star -->
+    <polygon points="0,-12 4,-2 14,0 4,2 0,12 -4,2 -14,0 -4,-2" fill="url(#gold)"/>
+    <circle cx="0" cy="20" r="8" fill="url(#gold)"/>
+    <path d="M -15,38 L 15,38" stroke="url(#gold)" stroke-width="3" stroke-linecap="round"/>
+  </g>
+  <!-- Text Brand -->
+  <text x="256" y="380" font-family="system-ui, -apple-system, sans-serif" font-size="34" font-weight="900" fill="#fcd34d" text-anchor="middle" letter-spacing="4">GRAND TURAN</text>
+  <text x="256" y="420" font-family="system-ui, -apple-system, sans-serif" font-size="20" font-weight="700" fill="#38bdf8" text-anchor="middle" letter-spacing="6">AI PASSPORT STUDIO</text>
+</svg>

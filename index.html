@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Grand Turan AI — Pasport &amp; Excel Studio</title>
+    <meta name="description" content="Professional sun'iy intellekt va OCR pasport tahlili, Prestige va FlyKhiva Excel eksporti, Telegram bot integratsiyasi va PWA tizimi." />
+    <meta property="og:title" content="Grand Turan AI — Pasport &amp; Excel Studio" />
+    <meta property="og:description" content="Professional sun'iy intellekt va OCR pasport tahlili, Prestige va FlyKhiva Excel eksporti, Telegram bot integratsiyasi va PWA tizimi." />
+    <meta property="og:type" content="website" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="theme-color" content="#1e293b" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-title" content="Grand Turan" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+    <link rel="icon" type="image/svg+xml" href="/icon.svg" />
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <script>
+      // Suppress harmless Vite dev WebSocket disconnect error in AI Studio preview iframe
+      (function() {
+        const origError = console.error;
+        console.error = function(...args) {
+          const str = args.map(function(a) {
+            return (a && (a.message || a.stack || String(a))) || '';
+          }).join(' ');
+          if (str.includes('WebSocket closed without opened') || str.includes('server connection lost')) {
+            return;
+          }
+          origError.apply(console, args);
+        };
+        window.addEventListener('unhandledrejection', function(event) {
+          const msg = (event.reason && (event.reason.message || event.reason.stack || String(event.reason))) || '';
+          if (msg.includes('WebSocket closed without opened')) {
+            event.preventDefault();
+          }
+        });
+        window.addEventListener('error', function(event) {
+          const msg = event.message || '';
+          if (msg.includes('WebSocket closed without opened')) {
+            event.preventDefault();
+          }
+        });
+      })();
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>
+
