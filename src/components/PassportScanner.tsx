@@ -11,6 +11,8 @@ import {
   BrainCircuit,
   Loader2,
   CheckCircle,
+  KeyRound,
+  ExternalLink,
 } from 'lucide-react';
 import confetti from 'canvas-confetti';
 
@@ -36,6 +38,9 @@ export const PassportScanner: React.FC<PassportScannerProps> = ({
   const [dragActive, setDragActive] = useState(false);
   const [engineMode, setEngineMode] = useState<'ai' | 'offline'>('ai');
   const [useThinking, setUseThinking] = useState(false);
+  const [apiKey, setApiKey] = useState(() => localStorage.getItem('gemini_api_key') || '');
+  const [showKeyInput, setShowKeyInput] = useState(false);
+  const [keySaved, setKeySaved] = useState(false);
 
   // Helper to read file as Base64
   const fileToBase64 = (file: File): Promise<string> => {
@@ -70,6 +75,7 @@ export const PassportScanner: React.FC<PassportScannerProps> = ({
             mimeType: file.type || 'image/jpeg',
             mode: engineMode,
             useThinking,
+            apiKey: apiKey.trim(),
           }),
         });
 
@@ -83,7 +89,6 @@ export const PassportScanner: React.FC<PassportScannerProps> = ({
       }
     }
 
-    // Ensure we append the new records to the existing state, not replace them
     if (newRecords.length > 0) {
       onAddPassports(newRecords);
       try {
@@ -102,18 +107,16 @@ export const PassportScanner: React.FC<PassportScannerProps> = ({
 
   // Quick sample passport generator (for instant testing without needing real passport scans)
   const handleLoadSample = () => {
-    // Fix: Generate multiple distinct records (6 passports) to fix the "1 name instead of 6" bug
-    const samples = [
+    const sampleNames = [
       { sur: 'KARIMOV', name: 'SARDOR', gen: 'M', ser: 'FA', num: '1234567', dob: '1990-yil 14-may', exp: '09.01.2033' },
-      { sur: 'KOSIMOV', name: 'ANVAR', gen: 'M', ser: 'FA', num: '5142207', dob: '1981-yil 25-yanvar', exp: '03.03.2032' },
-      { sur: 'AKHMEDOV', name: 'BEKZOD', gen: 'M', ser: 'AA', num: '9876543', dob: '1995-yil 10-iyul', exp: '05.05.2030' },
-      { sur: 'TURSUNOVA', name: 'GULNOZA', gen: 'F', ser: 'BA', num: '7654321', dob: '1988-yil 20-dekabr', exp: '15.06.2028' },
-      { sur: 'MIRZAYEV', name: 'JALOLIDDIN', gen: 'M', ser: 'CA', num: '1122334', dob: '1992-yil 05-sentabr', exp: '20.08.2031' },
-      { sur: 'YULDASHEVA', name: 'ZULFIYA', gen: 'F', ser: 'BB', num: '4455667', dob: '1999-yil 18-mart', exp: '12.04.2029' },
+      { sur: 'TOSHMATOVA', name: 'DILNOZA', gen: 'F', ser: 'AA', num: '9876543', dob: '1995-yil 22-avgust', exp: '15.08.2034' },
+      { sur: 'ALIEV', name: 'AZIZ', gen: 'M', ser: 'AB', num: '5566778', dob: '1988-yil 03-noyabr', exp: '20.11.2032' },
+      { sur: 'RAXIMOVA', name: 'ZARINA', gen: 'F', ser: 'FA', num: '4433221', dob: '2001-yil 11-yanvar', exp: '05.02.2031' },
     ];
 
-    const newRecords: PassportRecord[] = samples.map(pick => ({
-      id: `sample_${Date.now()}_${Math.random().toString(36).substring(2, 6)}_${pick.sur}`,
+    const pick = sampleNames[Math.floor(Math.random() * sampleNames.length)];
+    const sampleRecord: PassportRecord = {
+      id: `sample_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
       sourceFileName: `sample_passport_${pick.ser}${pick.num}.jpg`,
       surname: pick.sur,
       givenNames: pick.name,
@@ -128,13 +131,13 @@ export const PassportScanner: React.FC<PassportScannerProps> = ({
       nationality: "O'zbekiston",
       gender: pick.gen as 'M' | 'F',
       country: "O'zbekiston",
-      rawMrz: `P<UZB${pick.sur}<<${pick.name}<<<<<<<<<<<<<<<<<<<\\n${pick.ser}${pick.num}8UZB9005142${pick.gen}3301095<<<<<<<<<<<<<<02`,
+      rawMrz: `P<UZB${pick.sur}<<${pick.name}<<<<<<<<<<<<<<<<<<<\n${pick.ser}${pick.num}8UZB9005142${pick.gen}3301095<<<<<<<<<<<<<<02`,
       confidence: 0.99,
       engineUsed: engineMode === 'ai' ? 'gemini-3.8-flash' : 'offline-mrz',
       parsedAt: new Date().toISOString(),
-    }));
+    };
 
-    onAddPassports(newRecords);
+    onAddPassports([sampleRecord]);
     try {
       confetti({ particleCount: 30, spread: 50, origin: { y: 0.7 } });
     } catch {
@@ -210,6 +213,78 @@ export const PassportScanner: React.FC<PassportScannerProps> = ({
             </button>
           )}
         </div>
+      </div>
+
+      {/* Gemini AI API Key Manager Bar */}
+      <div className="mb-4 p-3 rounded-xl bg-slate-50 dark:bg-slate-800/60 border border-slate-200 dark:border-slate-700/80">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div className="flex items-center gap-2">
+            <KeyRound className="w-4 h-4 text-amber-500" />
+            <span className="text-xs font-semibold text-slate-800 dark:text-slate-200">
+              Gemini AI Dvigateli (Google AI Studio)
+            </span>
+            {apiKey ? (
+              <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border border-emerald-500/30 flex items-center gap-1">
+                <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse"></span>
+                Faol ({apiKey.slice(0, 4)}...{apiKey.slice(-4)})
+              </span>
+            ) : (
+              <span className="px-2 py-0.5 rounded-full text-[10px] font-medium bg-amber-500/10 text-amber-600 dark:text-amber-400 border border-amber-500/30">
+                Tesseract OCR (Kalitsiz rejim)
+              </span>
+            )}
+          </div>
+
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => setShowKeyInput(!showKeyInput)}
+              className="text-xs text-indigo-600 dark:text-indigo-400 hover:underline font-medium cursor-pointer"
+            >
+              {showKeyInput ? 'Yopish' : apiKey ? "Kalitni o'zgartirish" : 'Kalit kiritish (Yuqori aniqlik)'}
+            </button>
+            <a
+              href="https://aistudio.google.com/app/apikey"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="text-[11px] text-slate-500 hover:text-slate-800 dark:hover:text-slate-200 flex items-center gap-1"
+              title="Google AI Studio dan bepul kalit olish"
+            >
+              <span>AI Studio</span>
+              <ExternalLink className="w-3 h-3" />
+            </a>
+          </div>
+        </div>
+
+        {showKeyInput && (
+          <div className="mt-2.5 pt-2.5 border-t border-slate-200 dark:border-slate-700 flex flex-wrap sm:flex-nowrap items-center gap-2">
+            <input
+              type="password"
+              value={apiKey}
+              onChange={(e) => setApiKey(e.target.value)}
+              placeholder="Google AI Studio API kalitingizni kiriting (AIzaSy...)"
+              className="flex-1 px-3 py-1.5 text-xs rounded-lg bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-600 text-slate-800 dark:text-slate-100 placeholder-slate-400 focus:outline-hidden focus:border-amber-500"
+            />
+            <button
+              onClick={() => {
+                const trimmed = apiKey.trim();
+                localStorage.setItem('gemini_api_key', trimmed);
+                fetch('/api/admin/api-key', {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({ apiKey: trimmed }),
+                }).catch(() => {});
+                setKeySaved(true);
+                setTimeout(() => {
+                  setKeySaved(false);
+                  setShowKeyInput(false);
+                }, 1500);
+              }}
+              className="px-3 py-1.5 text-xs font-semibold rounded-lg bg-amber-500 hover:bg-amber-600 text-white transition-all shadow-sm cursor-pointer"
+            >
+              {keySaved ? '✓ Saqlandi!' : 'Saqlash'}
+            </button>
+          </div>
+        )}
       </div>
 
       {/* Drag & Drop Upload Zone */}

@@ -17,7 +17,7 @@ export interface PassportRecord {
   country: string;          // R: Davlat (e.g. "O'zbekiston")
   rawMrz?: string;
   confidence?: number;
-  engineUsed?: 'gemini-3.8-flash' | 'offline-mrz';
+  engineUsed?: 'gemini-3.8-flash' | 'gemini-2.5-flash' | 'gemini-2.5-pro' | 'tesseract-ocr' | 'offline-mrz' | string;
   parsedAt: string;
 }
 

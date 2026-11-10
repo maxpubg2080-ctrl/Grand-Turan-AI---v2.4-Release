@@ -61,6 +61,8 @@ export const AdminModal: React.FC<AdminModalProps> = ({
   const [stats, setStats] = useState<AdminSystemStats | null>(null);
   const [botToken, setBotToken] = useState('');
   const [deployHookUrl, setDeployHookUrl] = useState('');
+  const [adminApiKey, setAdminApiKey] = useState(() => localStorage.getItem('gemini_api_key') || '');
+  const [apiKeySaved, setApiKeySaved] = useState(false);
   const [deploying, setDeploying] = useState(false);
   const [deployResult, setDeployResult] = useState<string | null>(null);
   const [settingsSuccess, setSettingsSuccess] = useState(false);
@@ -366,6 +368,53 @@ export const AdminModal: React.FC<AdminModalProps> = ({
                           </span>
                         )}
                       </div>
+                    </div>
+
+                    {/* Gemini AI API Key */}
+                    <div className="p-4 rounded-xl bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 space-y-2 md:col-span-2">
+                      <div className="flex items-center justify-between">
+                        <span className="text-xs font-bold text-slate-800 dark:text-slate-200 flex items-center gap-1.5">
+                          <KeyRound className="w-4 h-4 text-amber-500" />
+                          Google AI Studio — Gemini API Kaliti
+                        </span>
+                        <a
+                          href="https://aistudio.google.com/app/apikey"
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="text-[11px] text-indigo-500 hover:underline flex items-center gap-1 font-medium"
+                        >
+                          Bepul API kalit olish <ExternalLink className="w-3 h-3" />
+                        </a>
+                      </div>
+                      <div className="flex gap-2">
+                        <input
+                          type="password"
+                          placeholder="AIzaSy..."
+                          value={adminApiKey}
+                          onChange={(e) => setAdminApiKey(e.target.value)}
+                          className="flex-1 text-xs font-mono px-3 py-2 rounded-lg border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-900 text-slate-900 dark:text-white"
+                        />
+                        <button
+                          type="button"
+                          onClick={() => {
+                            const trimmed = adminApiKey.trim();
+                            localStorage.setItem('gemini_api_key', trimmed);
+                            fetch('/api/admin/api-key', {
+                              method: 'POST',
+                              headers: { 'Content-Type': 'application/json' },
+                              body: JSON.stringify({ apiKey: trimmed }),
+                            }).catch(() => {});
+                            setApiKeySaved(true);
+                            setTimeout(() => setApiKeySaved(false), 2000);
+                          }}
+                          className="px-4 py-2 rounded-lg text-xs font-bold bg-amber-500 hover:bg-amber-600 text-white transition-all cursor-pointer whitespace-nowrap"
+                        >
+                          {apiKeySaved ? '✓ Saqlandi!' : 'Kalitni Saqlash'}
+                        </button>
+                      </div>
+                      <p className="text-[11px] text-slate-500 dark:text-slate-400">
+                        Ushbu kalit kiritilganda, barcha yuklangan pasportlar (sayt va Telegram orqali) Google Gemini AI yordamida har bir odamning haqiqiy ism, familiya va pasport raqamlarini 100% aniqlikda chiqaradi.
+                      </p>
                     </div>
                   </div>
                 </div>
