@@ -53,7 +53,7 @@ export const Header: React.FC<HeaderProps> = ({
   };
 
   return (
-    <header className="sticky top-0 z-40 w-full backdrop-blur-md border-b transition-colors duration-300 bg-white/80 dark:bg-slate-900/80 border-slate-200 dark:border-slate-800">
+    <header className="sticky top-0 z-40 w-full backdrop-blur-xl border-b transition-colors duration-300 bg-white/85 dark:bg-slate-950/75 border-slate-200/90 dark:border-slate-800/70">
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 h-18 flex items-center justify-between gap-2 sm:gap-4">
         {/* Brand */}
         <div className="flex items-center gap-3">
@@ -70,7 +70,8 @@ export const Header: React.FC<HeaderProps> = ({
               <h1 className="text-lg sm:text-xl font-black tracking-tight text-slate-900 dark:text-white">
                 Grand Turan <span className="text-amber-500 font-extrabold">AI</span>
               </h1>
-              <span className="hidden md:inline-flex items-center gap-1 text-[11px] font-semibold px-2 py-0.5 rounded-full bg-amber-500/10 text-amber-600 dark:text-amber-400 border border-amber-500/20">
+              <span className="hidden md:inline-flex items-center gap-1.5 text-[11px] font-bold tracking-wide text-amber-600 dark:text-amber-400">
+                <span className="text-slate-300 dark:text-slate-700">·</span>
                 {t.headerBadge}
               </span>
             </div>

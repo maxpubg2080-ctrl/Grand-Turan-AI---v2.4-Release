@@ -17,8 +17,10 @@ import {
   verifyMrzLine2,
   stripPatronymic,
   ensureDotDate,
+  resolvePassengerTitle,
 } from './src/utils/mrzParser.ts';
 import { generatePrestigeWorkbook, generateFlyKhivaWorkbook, workbookToBuffer } from './src/utils/excelGenerator.ts';
+import { collectProviderKeys } from './src/utils/aiProviders.ts';
 import { PassportRecord, FlightDetails } from './src/types/passport.ts';
 
 dotenv.config();
@@ -42,12 +44,34 @@ let flykhivaExports = 0;
 let botToken = process.env.TELEGRAM_BOT_TOKEN || '';
 let deployHookUrl = process.env.RENDER_DEPLOY_HOOK_URL || '';
 
+function getGeminiKeys(): string[] {
+  return collectProviderKeys(process.env, 'GEMINI');
+}
+
 function getEffectiveGeminiKey(): string {
-  const envKey = (process.env.GEMINI_API_KEY || '').trim();
-  if (!envKey || envKey === 'MY_GEMINI_API_KEY' || envKey.length < 10) {
-    return '';
+  return getGeminiKeys()[0] || '';
+}
+
+function getExternalProviderKeys() {
+  return {
+    groq: collectProviderKeys(process.env, 'GROQ'),
+    mistral: collectProviderKeys(process.env, 'MISTRAL'),
+    openrouter: collectProviderKeys(process.env, 'OPENROUTER'),
+  };
+}
+
+function getActiveEngineLabels(): string[] {
+  const labels: string[] = [];
+  const geminiKeys = getGeminiKeys();
+  if (geminiKeys.length > 0) {
+    labels.push(`Gemini (${geminiKeys.length} kalit • 4 model)`);
   }
-  return envKey;
+  const ext = getExternalProviderKeys();
+  if (ext.groq.length > 0) labels.push(`Groq Vision (${ext.groq.length} kalit)`);
+  if (ext.mistral.length > 0) labels.push(`Mistral Pixtral (${ext.mistral.length} kalit)`);
+  if (ext.openrouter.length > 0) labels.push(`OpenRouter :free (${ext.openrouter.length} kalit)`);
+  labels.push('Offline MRZ Checksum');
+  return labels;
 }
 
 class AppApiError extends Error {
@@ -77,35 +101,16 @@ function getSession(userId: string | number): TelegramUserSession {
   return telegramSessions.get(userId)!;
 }
 
-// ---------------------------------------------------------------------------
-// REAL PASSPORT PARSER (Gemini AI Vision — NEVER fabricates fake data)
-// ---------------------------------------------------------------------------
-async function generateWithRetry<T>(fn: () => Promise<T>, maxRetries = 2): Promise<T> {
-  let lastError: any;
-  for (let attempt = 0; attempt <= maxRetries; attempt++) {
-    try {
-      return await fn();
-    } catch (err: any) {
-      lastError = err;
-      const msg = String(err?.message || '');
-      const status = err?.status || err?.code;
-      const isTransient =
-        status === 429 ||
-        status === 500 ||
-        status === 503 ||
-        msg.includes('429') ||
-        msg.includes('503') ||
-        msg.includes('ECONNRESET') ||
-        msg.includes('ETIMEDOUT') ||
-        msg.includes('RESOURCE_EXHAUSTED');
+// Cooldown tracking for exhausted free-tier (provider:model:keyIndex) slots
+const providerCooldowns = new Map<string, number>();
 
-      if (!isTransient || attempt === maxRetries) {
-        throw err;
-      }
-      await new Promise((r) => setTimeout(r, 1000 * Math.pow(2, attempt)));
-    }
-  }
-  throw lastError;
+function isSlotOnCooldown(slotId: string): boolean {
+  const until = providerCooldowns.get(slotId) || 0;
+  return Date.now() < until;
+}
+
+function markSlotCooldown(slotId: string, ms: number) {
+  providerCooldowns.set(slotId, Date.now() + ms);
 }
 
 function cleanJsonResponse(text: string): string {
@@ -114,30 +119,7 @@ function cleanJsonResponse(text: string): string {
   return fenced ? fenced[1].trim() : trimmed;
 }
 
-async function parsePassportImage(
-  cleanBase64: string,
-  mimeType: string,
-  useThinking: boolean = false
-): Promise<{ record: PassportRecord; engine: string }> {
-  const effectiveKey = getEffectiveGeminiKey();
-  if (!effectiveKey) {
-    throw new AppApiError(
-      "GEMINI_API_KEY serverda sozlanmagan. Iltimos, AI Studio Secrets yoki Render Environment Variables bo'limida GEMINI_API_KEY ni kiriting (yoki Offline MRZ matn kiritishdan foydalaning).",
-      400
-    );
-  }
-
-  const client = new GoogleGenAI({
-    apiKey: effectiveKey,
-    httpOptions: {
-      headers: {
-        'User-Agent': 'aistudio-build',
-      },
-    },
-  });
-
-  const modelName = 'gemini-4-hydrogen';
-  const systemPrompt = `You are a strict, 100% truthful passport data extraction OCR engine.
+const OCR_SYSTEM_PROMPT = `You are a strict, 100% truthful passport data extraction OCR engine.
 CRITICAL RULES:
 1. Read ONLY the actual text and 2-line MRZ printed on the provided passport image. NEVER guess, invent, or substitute placeholder names or numbers.
 2. CHARACTER-BY-CHARACTER ACCURACY: Compare every single letter of Surname, Given Name, Series, Number, Birth Date, and Expiry Date between the visual bio-page AND the bottom 2-line OCR-B MRZ string. Watch carefully for easily confused characters (KH vs X, I vs Y, IY vs I, O vs 0, B vs 8, S vs 5, Z vs 2, U vs V). Use the OCR-B MRZ line at the bottom as your primary spelling reference.
@@ -149,10 +131,136 @@ CRITICAL RULES:
    - issueDate: "DD.MM.YYYY" (leave "" if not printed on document).
    - expiryDate: "DD.MM.YYYY".
 7. Extract series (2-3 uppercase letters, e.g. FA, AA, AB) and number (digits, e.g. 3832280) separately.
-8. title must be "MR" for male (M), "MRS" for female (F), or "CHD" if explicitly minor/child.`;
+8. Return gender as "M" or "F".`;
+
+const OPENAI_VISION_USER_PROMPT = `Transcribe the exact passport details and 2-line MRZ from this image into pure JSON with keys: errorReason, surname, givenNames, surnameLat, givenNamesLat, birthDate, series, number, issueDate, expiryDate, nationality, gender, country, rawMrz. Do not include patronymic. Return JSON only.`;
+
+function buildNormalizedRecord(parsedJson: Record<string, any>, engineName: string): PassportRecord {
+  if (parsedJson.errorReason && (!parsedJson.surname || !parsedJson.number)) {
+    throw new AppApiError(`Pasport o'qilmadi: ${parsedJson.errorReason}`, 422);
+  }
+
+  const rawMrz = String(parsedJson.rawMrz || '').trim();
+  const mrzCheck = rawMrz ? parseMrzLines(rawMrz) : null;
+  const mrzLine2 = mrzCheck?.rawMrz?.split('\n')[1] || '';
+  const mrzChecks = mrzLine2
+    ? verifyMrzLine2(mrzLine2)
+    : { numberValid: false, dobValid: false, expiryValid: false };
+  const mrzLine1 = mrzCheck?.rawMrz?.split('\n')[0] || '';
+  const mrzHasCleanNameDelimiter = mrzLine1.includes('<<') && (mrzLine1.split('<<')[1] || '').includes('<');
+
+  // Prefer mathematically checksum-verified MRZ fields when available
+  const visualSurname = String(parsedJson.surname || '').toUpperCase().trim();
+  const visualGiven = stripPatronymic(String(parsedJson.givenNames || ''));
+
+  const surname =
+    mrzChecks.numberValid && mrzHasCleanNameDelimiter && mrzCheck?.surname
+      ? mrzCheck.surname
+      : visualSurname || mrzCheck?.surname || '';
+
+  const givenNames =
+    mrzChecks.numberValid && mrzHasCleanNameDelimiter && mrzCheck?.givenNames
+      ? mrzCheck.givenNames
+      : visualGiven || mrzCheck?.givenNames || '';
+
+  const surnameLat = String(parsedJson.surnameLat || surname)
+    .toUpperCase()
+    .trim();
+  const givenNamesLat = stripPatronymic(String(parsedJson.givenNamesLat || givenNames));
+
+  let series = (
+    mrzChecks.numberValid && mrzCheck?.series
+      ? mrzCheck.series
+      : String(parsedJson.series || mrzCheck?.series || '')
+  )
+    .toUpperCase()
+    .replace(/[^A-Z]/g, '')
+    .slice(0, 3);
+  let number = (
+    mrzChecks.numberValid && mrzCheck?.number
+      ? mrzCheck.number
+      : String(parsedJson.number || mrzCheck?.number || '')
+  )
+    .toUpperCase()
+    .replace(/[^A-Z0-9]/g, '');
+
+  if (!series && /^[A-Z]{1,3}[0-9]{5,9}$/.test(number)) {
+    const splitMatch = number.match(/^([A-Z]{1,3})([0-9]{5,9})$/);
+    if (splitMatch) {
+      series = splitMatch[1];
+      number = splitMatch[2];
+    }
+  } else if (series && number.startsWith(series) && number.length > series.length + 4) {
+    number = number.slice(series.length);
+  }
+
+  if (!surname || !number) {
+    throw new AppApiError(
+      "Rasmdan pasport familiyasi yoki raqami aniqlanmadi. Iltimos, aniqroq pasport suratini yuklang.",
+      422
+    );
+  }
+
+  const gender: 'M' | 'F' =
+    String(parsedJson.gender || '').toUpperCase().startsWith('F') || mrzCheck?.gender === 'F'
+      ? 'F'
+      : 'M';
+
+  const resolvedBirthDate =
+    mrzChecks.dobValid && mrzCheck?.birthDate
+      ? mrzCheck.birthDate
+      : String(parsedJson.birthDate || mrzCheck?.birthDate || '').trim();
+
+  const resolvedExpiryDate =
+    mrzChecks.expiryValid && mrzCheck?.expiryDate
+      ? mrzCheck.expiryDate
+      : ensureDotDate(String(parsedJson.expiryDate || mrzCheck?.expiryDate || '').trim());
+
+  // Strict aviation age classification (<2 INF, 2-11 CHD, 12+ MR/MRS)
+  const title = resolvePassengerTitle(resolvedBirthDate, gender);
+
+  return {
+    id: `pass_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+    surname,
+    givenNames: givenNames || '-',
+    surnameLat: mrzChecks.numberValid && mrzHasCleanNameDelimiter ? surname : surnameLat,
+    givenNamesLat:
+      (mrzChecks.numberValid && mrzHasCleanNameDelimiter ? givenNames : givenNamesLat) ||
+      givenNames ||
+      '-',
+    birthDate: resolvedBirthDate,
+    title,
+    series,
+    number,
+    issueDate: ensureDotDate(String(parsedJson.issueDate || mrzCheck?.issueDate || '').trim()),
+    expiryDate: resolvedExpiryDate,
+    nationality: String(parsedJson.nationality || mrzCheck?.nationality || "O'zbekiston").trim(),
+    gender,
+    country: String(parsedJson.country || mrzCheck?.country || "O'zbekiston").trim(),
+    rawMrz,
+    confidence: 0.99,
+    engineUsed: engineName,
+    parsedAt: new Date().toISOString(),
+  };
+}
+
+async function callGeminiModel(
+  apiKey: string,
+  modelName: string,
+  cleanBase64: string,
+  mimeType: string
+): Promise<string> {
+  const client = new GoogleGenAI({
+    apiKey,
+    httpOptions: {
+      headers: {
+        'User-Agent': 'aistudio-build',
+      },
+    },
+  });
 
   const config: Record<string, any> = {
-    systemInstruction: systemPrompt,
+    systemInstruction: OCR_SYSTEM_PROMPT,
     responseMimeType: 'application/json',
     responseSchema: {
       type: Type.OBJECT,
@@ -175,165 +283,278 @@ CRITICAL RULES:
       },
       required: ['surname', 'givenNames', 'series', 'number'],
     },
-    thinkingConfig: {
-      thinkingLevel: ThinkingLevel.HIGH,
-    },
   };
 
-  let responseText = '';
-  try {
-    const response = await generateWithRetry(() =>
-      client.models.generateContent({
-        model: modelName,
-        contents: {
-          parts: [
+  if (modelName === 'gemini-4-hydrogen') {
+    config.thinkingConfig = {
+      thinkingLevel: ThinkingLevel.HIGH,
+    };
+  }
+
+  const response = await client.models.generateContent({
+    model: modelName,
+    contents: {
+      parts: [
+        {
+          inlineData: {
+            mimeType,
+            data: cleanBase64,
+          },
+        },
+        {
+          text: 'Transcribe the exact passport details and MRZ from this image into JSON. Do not include patronymic. Do not invent any data.',
+        },
+      ],
+    },
+    config,
+  });
+
+  return response.text || '';
+}
+
+async function callOpenAiCompatibleVision(
+  endpoint: string,
+  apiKey: string,
+  model: string,
+  cleanBase64: string,
+  mimeType: string,
+  extraHeaders: Record<string, string> = {}
+): Promise<string> {
+  const res = await fetch(endpoint, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${apiKey}`,
+      ...extraHeaders,
+    },
+    body: JSON.stringify({
+      model,
+      temperature: 0.1,
+      messages: [
+        { role: 'system', content: OCR_SYSTEM_PROMPT },
+        {
+          role: 'user',
+          content: [
+            { type: 'text', text: OPENAI_VISION_USER_PROMPT },
             {
-              inlineData: {
-                mimeType,
-                data: cleanBase64,
-              },
-            },
-            {
-              text: 'Transcribe the exact passport details and MRZ from this image into JSON. Do not include patronymic. Do not invent any data.',
+              type: 'image_url',
+              image_url: { url: `data:${mimeType};base64,${cleanBase64}` },
             },
           ],
         },
-        config,
-      })
-    );
-    responseText = response.text || '';
-  } catch (aiErr: any) {
-    const rawMsg = String(aiErr?.message || 'Gemini API xatosi');
-    if (rawMsg.includes('PERMISSION_DENIED') || rawMsg.includes('API_KEY_INVALID') || rawMsg.includes('403') || rawMsg.includes('401')) {
-      throw new AppApiError(
-        `Gemini API kaliti noto'g'ri yoki ruxsat yo'q. Settings > Secrets yoki Render Environment Variables bo'limida GEMINI_API_KEY ni tekshiring. (${rawMsg})`,
-        403
-      );
-    }
-    if (rawMsg.includes('NOT_FOUND') || rawMsg.includes('404')) {
-      throw new AppApiError(`Gemini modeli topilmadi (${modelName}): ${rawMsg}`, 404);
-    }
-    throw new AppApiError(`Gemini AI tahlil xatosi: ${rawMsg}`, 502);
+      ],
+    }),
+  });
+
+  if (!res.ok) {
+    const errBody = await res.text().catch(() => '');
+    const err: any = new Error(`HTTP ${res.status}: ${errBody || res.statusText}`);
+    err.status = res.status;
+    throw err;
   }
 
-  let parsedJson: Record<string, any> = {};
-  try {
-    parsedJson = JSON.parse(cleanJsonResponse(responseText) || '{}');
-  } catch {
-    throw new AppApiError("Sun'iy intellekt javobi JSON formatida qaytmadi. Rasmni qayta yuklab ko'ring.", 502);
-  }
+  const json = await res.json();
+  return String(json?.choices?.[0]?.message?.content || '');
+}
 
-  if (parsedJson.errorReason && (!parsedJson.surname || !parsedJson.number)) {
-    throw new AppApiError(`Pasport o'qilmadi: ${parsedJson.errorReason}`, 422);
-  }
+function classifyProviderError(err: any) {
+  const msg = String(err?.message || '');
+  const status = err?.status || err?.code;
+  const isRateLimit =
+    status === 429 || msg.includes('429') || msg.includes('RESOURCE_EXHAUSTED') || msg.includes('rate_limit');
+  const isDailyLimit =
+    isRateLimit &&
+    (/perday|daily|rpd|limit:\s*20|quota/i.test(msg) && !/perminute|rpm|retry in \d+s/i.test(msg));
+  const isNotFound = status === 404 || msg.includes('404') || msg.includes('NOT_FOUND');
+  const isAuthError =
+    status === 401 || status === 403 || msg.includes('PERMISSION_DENIED') || msg.includes('API_KEY_INVALID');
+  return { msg, isRateLimit, isDailyLimit, isNotFound, isAuthError };
+}
 
-  const rawMrz = String(parsedJson.rawMrz || '').trim();
-  const mrzCheck = rawMrz ? parseMrzLines(rawMrz) : null;
-  const mrzLine2 = mrzCheck?.rawMrz?.split('\n')[1] || '';
-  const mrzChecks = mrzLine2 ? verifyMrzLine2(mrzLine2) : { numberValid: false, dobValid: false, expiryValid: false };
-  const mrzLine1 = mrzCheck?.rawMrz?.split('\n')[0] || '';
-  const mrzHasCleanNameDelimiter = mrzLine1.includes('<<') && (mrzLine1.split('<<')[1] || '').includes('<');
+async function parsePassportImage(
+  cleanBase64: string,
+  mimeType: string,
+  _useThinking: boolean = false
+): Promise<{ record: PassportRecord; engine: string }> {
+  const geminiKeys = getGeminiKeys();
+  const extKeys = getExternalProviderKeys();
 
-  // Prefer mathematically checksum-verified MRZ fields when available
-  const visualSurname = String(parsedJson.surname || '').toUpperCase().trim();
-  const visualGiven = stripPatronymic(String(parsedJson.givenNames || ''));
-
-  const surname =
-    mrzChecks.numberValid && mrzHasCleanNameDelimiter && mrzCheck?.surname
-      ? mrzCheck.surname
-      : visualSurname || mrzCheck?.surname || '';
-
-  const givenNames =
-    mrzChecks.numberValid && mrzHasCleanNameDelimiter && mrzCheck?.givenNames
-      ? mrzCheck.givenNames
-      : visualGiven || mrzCheck?.givenNames || '';
-
-  const surnameLat = String(parsedJson.surnameLat || surname)
-    .toUpperCase()
-    .trim();
-  const givenNamesLat = stripPatronymic(
-    String(parsedJson.givenNamesLat || givenNames)
-  );
-
-  // Extract series and number cleanly without inventing fallback numbers
-  let series = (
-    mrzChecks.numberValid && mrzCheck?.series
-      ? mrzCheck.series
-      : String(parsedJson.series || mrzCheck?.series || '')
-  )
-    .toUpperCase()
-    .replace(/[^A-Z]/g, '')
-    .slice(0, 3);
-  let number = (
-    mrzChecks.numberValid && mrzCheck?.number
-      ? mrzCheck.number
-      : String(parsedJson.number || mrzCheck?.number || '')
-  )
-    .toUpperCase()
-    .replace(/[^A-Z0-9]/g, '');
-
-  // If Gemini put full "FA1234567" into number and left series empty, split it
-  if (!series && /^[A-Z]{1,3}[0-9]{5,9}$/.test(number)) {
-    const splitMatch = number.match(/^([A-Z]{1,3})([0-9]{5,9})$/);
-    if (splitMatch) {
-      series = splitMatch[1];
-      number = splitMatch[2];
-    }
-  } else if (series && number.startsWith(series) && number.length > series.length + 4) {
-    number = number.slice(series.length);
-  }
-
-  if (!surname || !number) {
+  if (
+    geminiKeys.length === 0 &&
+    extKeys.groq.length === 0 &&
+    extKeys.mistral.length === 0 &&
+    extKeys.openrouter.length === 0
+  ) {
     throw new AppApiError(
-      "Rasmdan pasport familiyasi yoki raqami aniqlanmadi. Iltimos, aniqroq pasport suratini yuklang.",
-      422
+      "Serverda birorta ham AI kaliti sozlanmagan (GEMINI_API_KEY, GROQ_API_KEY, MISTRAL_API_KEY yoki OPENROUTER_API_KEY kiriting, yoki Offline MRZ matn rejimidan foydalaning).",
+      400
     );
   }
 
-  const gender: 'M' | 'F' =
-    parsedJson.gender === 'F' || mrzCheck?.gender === 'F' ? 'F' : 'M';
-  const title: 'MR' | 'MRS' | 'CHD' =
-    parsedJson.title === 'CHD'
-      ? 'CHD'
-      : parsedJson.title === 'MRS' || gender === 'F'
-      ? 'MRS'
-      : 'MR';
+  const attempts: Array<{
+    id: string;
+    label: string;
+    run: () => Promise<string>;
+  }> = [];
 
-  const resolvedBirthDate =
-    mrzChecks.dobValid && mrzCheck?.birthDate
-      ? mrzCheck.birthDate
-      : String(parsedJson.birthDate || mrzCheck?.birthDate || '').trim();
+  // 1. Primary Gemini Multi-Model & Multi-Key Cascade (20 RPD * models * projects)
+  const geminiModels = [
+    'gemini-4-hydrogen',
+    'gemini-3.8-flash',
+    'gemini-2.5-flash',
+    'gemini-3.1-flash-lite',
+  ];
+  for (const model of geminiModels) {
+    geminiKeys.forEach((key, idx) => {
+      const suffix = geminiKeys.length > 1 ? `#${idx + 1}` : '';
+      attempts.push({
+        id: `gemini:${model}:${idx}`,
+        label: `${model}${suffix}`,
+        run: () => callGeminiModel(key, model, cleanBase64, mimeType),
+      });
+    });
+  }
 
-  const resolvedExpiryDate =
-    mrzChecks.expiryValid && mrzCheck?.expiryDate
-      ? mrzCheck.expiryDate
-      : ensureDotDate(String(parsedJson.expiryDate || mrzCheck?.expiryDate || '').trim());
+  // 2. Groq Free Vision Fallback (rotates across all configured GROQ_API_KEY_1..N)
+  for (const model of ['meta-llama/llama-4-scout-17b-16e-instruct', 'meta-llama/llama-4-maverick-17b-16e-instruct']) {
+    extKeys.groq.forEach((key, idx) => {
+      const suffix = extKeys.groq.length > 1 ? `#${idx + 1}` : '';
+      attempts.push({
+        id: `groq:${model}:${idx}`,
+        label: `groq:${model.split('/').pop()}${suffix}`,
+        run: () =>
+          callOpenAiCompatibleVision(
+            'https://api.groq.com/openai/v1/chat/completions',
+            key,
+            model,
+            cleanBase64,
+            mimeType
+          ),
+      });
+    });
+  }
 
-  const record: PassportRecord = {
-    id: `pass_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
-    surname,
-    givenNames: givenNames || '-',
-    surnameLat: mrzChecks.numberValid && mrzHasCleanNameDelimiter ? surname : surnameLat,
-    givenNamesLat:
-      (mrzChecks.numberValid && mrzHasCleanNameDelimiter ? givenNames : givenNamesLat) ||
-      givenNames ||
-      '-',
-    birthDate: resolvedBirthDate,
-    title,
-    series,
-    number,
-    issueDate: ensureDotDate(String(parsedJson.issueDate || mrzCheck?.issueDate || '').trim()),
-    expiryDate: resolvedExpiryDate,
-    nationality: String(parsedJson.nationality || mrzCheck?.nationality || "O'zbekiston").trim(),
-    gender,
-    country: String(parsedJson.country || mrzCheck?.country || "O'zbekiston").trim(),
-    rawMrz,
-    confidence: 0.99,
-    engineUsed: modelName,
-    parsedAt: new Date().toISOString(),
-  };
+  // 3. Mistral Pixtral Free Fallback (rotates across all configured MISTRAL_API_KEY_1..N)
+  extKeys.mistral.forEach((key, idx) => {
+    const suffix = extKeys.mistral.length > 1 ? `#${idx + 1}` : '';
+    attempts.push({
+      id: `mistral:pixtral-12b-2409:${idx}`,
+      label: `mistral:pixtral-12b${suffix}`,
+      run: () =>
+        callOpenAiCompatibleVision(
+          'https://api.mistral.ai/v1/chat/completions',
+          key,
+          'pixtral-12b-2409',
+          cleanBase64,
+          mimeType
+        ),
+    });
+  });
 
-  return { record, engine: modelName };
+  // 4. OpenRouter Free Vision Models Fallback (rotates across all configured OPENROUTER_API_KEY_1..N)
+  for (const model of ['google/gemma-3-27b-it:free', 'qwen/qwen2.5-vl-72b-instruct:free', 'openrouter/free']) {
+    extKeys.openrouter.forEach((key, idx) => {
+      const suffix = extKeys.openrouter.length > 1 ? `#${idx + 1}` : '';
+      attempts.push({
+        id: `openrouter:${model}:${idx}`,
+        label: `openrouter:${model.split('/').pop()}${suffix}`,
+        run: () =>
+          callOpenAiCompatibleVision(
+            'https://openrouter.ai/api/v1/chat/completions',
+            key,
+            model,
+            cleanBase64,
+            mimeType,
+            { 'HTTP-Referer': 'https://grand-turan-ai.onrender.com', 'X-Title': 'Grand Turan AI' }
+          ),
+      });
+    });
+  }
+
+  let lastErrorMsg = '';
+  const rpmPausedCandidates: typeof attempts = [];
+  let sawOnlyAuthErrors = true;
+  const triedLabels: string[] = [];
+
+  for (const candidate of attempts) {
+    if (isSlotOnCooldown(candidate.id)) {
+      continue;
+    }
+    triedLabels.push(candidate.label);
+    try {
+      const responseText = await candidate.run();
+      let parsedJson: Record<string, any> = {};
+      try {
+        parsedJson = JSON.parse(cleanJsonResponse(responseText) || '{}');
+      } catch {
+        // Non-JSON answer from fallback model; try next candidate
+        lastErrorMsg = `${candidate.label}: JSON javob qaytarmadi`;
+        sawOnlyAuthErrors = false;
+        continue;
+      }
+
+      // If image itself is NOT a passport / unreadable, return explicit 422 right away (don't burn other quotas)
+      const record = buildNormalizedRecord(parsedJson, candidate.label);
+      return { record, engine: candidate.label };
+    } catch (err: any) {
+      if (err instanceof AppApiError && err.statusCode === 422) {
+        throw err;
+      }
+      const { msg, isRateLimit, isDailyLimit, isNotFound, isAuthError } = classifyProviderError(err);
+      lastErrorMsg = `${candidate.label}: ${msg}`;
+
+      if (!isAuthError) {
+        sawOnlyAuthErrors = false;
+      }
+
+      if (isNotFound || isAuthError) {
+        // Model unsupported or invalid key -> skip for 30 min
+        markSlotCooldown(candidate.id, 30 * 60_000);
+      } else if (isDailyLimit) {
+        // Daily RPD limit reached -> cooldown for 15 min so next scans jump straight to fallback
+        markSlotCooldown(candidate.id, 15 * 60_000);
+      } else if (isRateLimit) {
+        // Transient per-minute RPM limit -> remember to retry after short pause if all fallbacks hit RPM too
+        rpmPausedCandidates.push(candidate);
+      }
+    }
+  }
+
+  // If all available free models hit 5-RPM speed limit simultaneously, wait 12s once and retry top available candidate
+  if (rpmPausedCandidates.length > 0) {
+    await new Promise((r) => setTimeout(r, 12000));
+    const retryTarget = rpmPausedCandidates[0];
+    try {
+      const responseText = await retryTarget.run();
+      const parsedJson = JSON.parse(cleanJsonResponse(responseText) || '{}');
+      const record = buildNormalizedRecord(parsedJson, retryTarget.label);
+      return { record, engine: retryTarget.label };
+    } catch (retryErr: any) {
+      if (retryErr instanceof AppApiError && retryErr.statusCode === 422) {
+        throw retryErr;
+      }
+      lastErrorMsg = `${retryTarget.label}: ${retryErr?.message || lastErrorMsg}`;
+    }
+  }
+
+  if (triedLabels.length === 0) {
+    throw new AppApiError(
+      "Barcha bepul AI modellarning kunlik limiti vaqtincha tugagan (15 daqiqada qayta tekshiriladi). Ungacha 'MRZ Matn (Offline)' rejimidan foydalaning yoki Render Environment ga GROQ_API_KEY / qo'shimcha kalit qo'shing.",
+      429
+    );
+  }
+
+  if (sawOnlyAuthErrors) {
+    throw new AppApiError(
+      `AI API kaliti noto'g'ri yoki ruxsat yo'q. Server Environment kalitlarini tekshiring. (${lastErrorMsg})`,
+      403
+    );
+  }
+
+  throw new AppApiError(
+    `AI limit yoki tarmoq xatosi (${triedLabels.length} ta model sinab ko'rildi): ${lastErrorMsg}`,
+    502
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -614,11 +835,13 @@ app.post('/api/telegram/webhook', async (req: Request, res: Response) => {
     if (text.startsWith('/start')) {
       const welcome = `⚜️ <b>Grand Turan — AI Pasport & Updater Bot</b>\n\n` +
         `Assalomu alaykum! Tizimga xush kelibsiz.\n` +
-        `👨💻 <b>Dasturchi:</b> Muhammad Amin\n\n` +
-        `📸 Pasport rasmlarini yuboring (1 tadan 100 tagacha), so'ng:\n` +
+        `👨‍💻 <b>Dasturchi:</b> Muhammad Amin\n\n` +
+        `📸 Pasport rasmlarini yuboring (1 tadan 100 tagacha) yoki 2 qatorli MRZ matnini yozing:\n` +
+        `• /mrz — MRZ matn yozish qoidalari va misol\n` +
         `• /flykhiva — FlyKhiva Zayafka (.xlsx) olish\n` +
         `• /prestige — Zayafka Prestige (.xlsx) olish\n` +
         `• /clear — navbatni tozalash\n\n` +
+        `🏷 <b>Yosh va jins qoidasi:</b> &lt;2 yosh = INF | 2–11 yosh = CHD | 12+ erkak = MR | 12+ ayol = MRS\n\n` +
         `⚙️ Server & Updater buyruqlari:\n` +
         `• /status — Render server, AI va Baza holati\n` +
         `• /redeploy — Render serverni qayta yangilash`;
@@ -629,15 +852,34 @@ app.post('/api/telegram/webhook', async (req: Request, res: Response) => {
             { text: '✈️ FlyKhiva Rejimi', callback_data: 'mode_flykhiva' },
             { text: '🏛 Prestige Rejimi', callback_data: 'mode_prestige' },
           ],
+          [{ text: '📝 MRZ Matn Qoidalari (/mrz)', callback_data: 'show_mrz_rules' }],
         ],
       });
       res.json({ ok: true });
       return;
     }
 
+    if (text.startsWith('/mrz') || text === 'show_mrz_rules') {
+      const mrzGuide =
+        `📝 <b>MRZ Matn Yozish Qoidalari (API kalitsiz 100% bepul):</b>\n\n` +
+        `1️⃣ <b>1-qator (F.I.O):</b> <code>P&lt;UZBFAMILIYA&lt;&lt;ISM&lt;&lt;&lt;&lt;&lt;&lt;&lt;</code>\n` +
+        `   <i>(Faqat Familiya va bitta Ism — otasining ismi yozilmaydi)</i>\n` +
+        `2️⃣ <b>2-qator (Pasport va sana):</b>\n` +
+        `   <code>SERIYA(2)RAQAM(7)[Check]UZB[YYMMDD Tug'ilgan][Check][M/F][YYMMDD Muddat][Check]</code>\n` +
+        `3️⃣ <b>Yosh va Jins (Avtomatik):</b>\n` +
+        `   • 2 yoshdan kichik → <b>INF</b>\n` +
+        `   • 2 yoshga to'lgan – 11 yosh → <b>CHD</b>\n` +
+        `   • 12 yoshga to'lgan va katta: Erkak → <b>MR</b>, Ayol → <b>MRS</b>\n\n` +
+        `📋 <b>Tayyor namuna (nusxa olib yuboring):</b>\n` +
+        `<pre>P&lt;UZBKARIMOV&lt;&lt;SARDOR&lt;&lt;&lt;&lt;&lt;&lt;&lt;&lt;&lt;&lt;&lt;&lt;&lt;&lt;&lt;&lt;&lt;&lt;&lt;&lt;&lt;&lt;&lt;\nFA12345678UZB9005142M3301095&lt;&lt;&lt;&lt;&lt;&lt;&lt;&lt;&lt;&lt;&lt;&lt;&lt;&lt;02</pre>`;
+      await sendTelegramReply(mrzGuide);
+      res.json({ ok: true });
+      return;
+    }
+
     if (text.startsWith('/skip')) {
       session.useApi = false;
-      await sendTelegramReply(`ℹ️ <b>MRZ matn rejimi yoqildi!</b>\nPasport ostidagi 2 qatorli MRZ matnini (P<UZB...) yuboring yoki AI uchun rasm tashlang.`);
+      await sendTelegramReply(`ℹ️ <b>MRZ matn rejimi yoqildi!</b>\nPasport ostidagi 2 qatorli MRZ matnini (P&lt;UZB...) yuboring yoki qoidani ko'rish uchun /mrz bosing.`);
       res.json({ ok: true });
       return;
     }
@@ -686,10 +928,10 @@ app.post('/api/telegram/webhook', async (req: Request, res: Response) => {
     if (text.startsWith('/status')) {
       const uptimeSec = Math.floor((Date.now() - startTime) / 1000);
       const memMb = Math.round(process.memoryUsage().rss / 1024 / 1024);
-      const aiReady = Boolean(getEffectiveGeminiKey());
+      const activeList = getActiveEngineLabels().join(', ');
       const msg = `⚙️ <b>Server & Updater Holati:</b>\n\n` +
         `🟢 <b>Server:</b> Faol (Uptime: ${uptimeSec} soniya)\n` +
-        `🧠 <b>AI Dvigateli:</b> gemini-4-hydrogen (${aiReady ? 'Faol' : 'GEMINI_API_KEY kiritilmagan'})\n` +
+        `🧠 <b>AI Dvigatellari:</b> ${activeList}\n` +
         `💾 <b>Baza:</b> ${scannedPassports.length} ta pasport yozilgan\n` +
         `📊 <b>Xotira:</b> ${memMb} MB\n` +
         `👨💻 <b>Dasturchi:</b> Muhammad Amin\n` +
@@ -715,20 +957,33 @@ app.post('/api/telegram/webhook', async (req: Request, res: Response) => {
     }
 
     // Raw MRZ text sent directly to Telegram bot
-    if (text.includes('P<')) {
+    const normalizedUpper = text.toUpperCase();
+    const looksLikeMrz =
+      normalizedUpper.includes('P<') ||
+      normalizedUpper.split(/\r?\n/).filter((l: string) => l.trim().length >= 30).length >= 2;
+
+    if (looksLikeMrz) {
       const mrzRecord = parseMrzLines(text);
       if (mrzRecord) {
         session.passports.push(mrzRecord);
         scannedPassports.push(mrzRecord);
         const reply = `✅ <b>MRZ qabul qilindi (#${session.passports.length}):</b>\n` +
           `👤 <b>F.I.O:</b> ${mrzRecord.surname} ${mrzRecord.givenNames}\n` +
+          `🏷 <b>Turi/Jinsi:</b> ${mrzRecord.title} (${mrzRecord.gender})\n` +
           `📄 <b>Pasport №:</b> ${mrzRecord.series}${mrzRecord.number}\n` +
-          `📅 <b>Tug'ilgan:</b> ${mrzRecord.birthDate}\n` +
-          `⏳ <b>Amal qilish:</b> ${mrzRecord.expiryDate}\n` +
+          `📅 <b>Tug'ilgan:</b> ${mrzRecord.birthDate || '-'}\n` +
+          `⏳ <b>Amal qilish:</b> ${mrzRecord.expiryDate || '-'}\n` +
           `⚡️ <b>Dvigatel:</b> offline-mrz`;
-        await sendTelegramReply(reply);
+        await sendTelegramReply(reply, {
+          inline_keyboard: [
+            [
+              { text: '📥 FlyKhiva Excel olish', callback_data: 'get_flykhiva' },
+              { text: '📥 Prestige Excel olish', callback_data: 'get_prestige' },
+            ],
+          ],
+        });
       } else {
-        await sendTelegramReply(`⚠️ MRZ matnidan ma'lumot ajratib bo'lmadi. Iltimos 2 qatorni to'liq yuboring.`);
+        await sendTelegramReply(`⚠️ MRZ matnidan ma'lumot ajratib bo'lmadi. Qoida va misol uchun /mrz bosing.`);
       }
       res.json({ ok: true });
       return;
@@ -770,6 +1025,7 @@ app.post('/api/telegram/webhook', async (req: Request, res: Response) => {
 
         const reply = `✅ <b>Pasport qabul qilindi (#${session.passports.length}):</b>\n` +
           `👤 <b>F.I.O:</b> ${parsedRecord.surname} ${parsedRecord.givenNames}\n` +
+          `🏷 <b>Turi/Jinsi:</b> ${parsedRecord.title} (${parsedRecord.gender})\n` +
           `📄 <b>Pasport №:</b> ${parsedRecord.series}${parsedRecord.number}\n` +
           `📅 <b>Tug'ilgan:</b> ${parsedRecord.birthDate}\n` +
           `⏳ <b>Amal qilish:</b> ${parsedRecord.expiryDate}\n` +
@@ -804,6 +1060,13 @@ app.post('/api/telegram/webhook', async (req: Request, res: Response) => {
 app.get('/api/admin/status', (req: Request, res: Response) => {
   const uptimeSec = Math.floor((Date.now() - startTime) / 1000);
   const memMb = Math.round(process.memoryUsage().rss / 1024 / 1024);
+  const ext = getExternalProviderKeys();
+  const hasAnyAi = Boolean(
+    getEffectiveGeminiKey() ||
+      ext.groq.length > 0 ||
+      ext.mistral.length > 0 ||
+      ext.openrouter.length > 0
+  );
 
   res.json({
     totalScanned: scannedPassports.length,
@@ -813,7 +1076,8 @@ app.get('/api/admin/status', (req: Request, res: Response) => {
     uptimeSeconds: uptimeSec,
     nodeVersion: process.version,
     memoryUsageMb: memMb,
-    aiEngineStatus: getEffectiveGeminiKey() ? 'active' : 'missing_key',
+    aiEngineStatus: hasAnyAi ? 'active' : 'missing_key',
+    activeEngines: getActiveEngineLabels(),
     telegramWebhookConfigured: Boolean(botToken),
     telegramBotUsername: '@grandturanai_bot',
     renderDeployHookConfigured: Boolean(deployHookUrl),

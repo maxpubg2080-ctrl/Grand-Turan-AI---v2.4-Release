@@ -188,7 +188,7 @@ export const PassportScanner: React.FC<PassportScannerProps> = ({
   };
 
   return (
-    <div className="w-full rounded-2xl p-4 sm:p-6 transition-all duration-300 bg-white/90 dark:bg-slate-900/90 border border-slate-200 dark:border-slate-800 shadow-xl shadow-slate-900/5">
+    <div className="w-full rounded-2xl p-4 sm:p-6 transition-all duration-300 bg-white/95 dark:bg-slate-900/75 dark:backdrop-blur-xl border border-slate-200/90 dark:border-slate-700/60 shadow-xl shadow-slate-900/5 dark:shadow-black/30">
       {/* Engine & Settings Bar */}
       <div className="flex flex-wrap items-center justify-between gap-3 mb-5 pb-4 border-b border-slate-200 dark:border-slate-800">
         <div>

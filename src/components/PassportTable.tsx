@@ -15,6 +15,7 @@ import {
 } from 'lucide-react';
 import confetti from 'canvas-confetti';
 import { downloadProjectSourceZip } from '../utils/downloadProject';
+import { resolvePassengerTitle } from '../utils/mrzParser';
 
 interface PassportTableProps {
   lang: AppLang;
@@ -59,7 +60,7 @@ export const PassportTable: React.FC<PassportTableProps> = ({
 
   if (passports.length === 0) {
     return (
-      <div className="w-full rounded-2xl p-8 sm:p-12 text-center bg-white/80 dark:bg-slate-900/80 border border-slate-200 dark:border-slate-800 shadow-sm">
+      <div className="w-full rounded-2xl p-8 sm:p-12 text-center bg-white/95 dark:bg-slate-900/75 dark:backdrop-blur-xl border border-slate-200/90 dark:border-slate-700/60 shadow-sm">
         <div className="w-16 h-16 mx-auto rounded-2xl bg-slate-100 dark:bg-slate-800 flex items-center justify-center text-slate-400 mb-4">
           <FileSpreadsheet className="w-8 h-8" />
         </div>
@@ -74,7 +75,7 @@ export const PassportTable: React.FC<PassportTableProps> = ({
   }
 
   return (
-    <div className="w-full rounded-2xl bg-white/90 dark:bg-slate-900/90 border border-slate-200 dark:border-slate-800 shadow-xl shadow-slate-900/5 overflow-hidden">
+    <div className="w-full rounded-2xl bg-white/95 dark:bg-slate-900/75 dark:backdrop-blur-xl border border-slate-200/90 dark:border-slate-700/60 shadow-xl shadow-slate-900/5 dark:shadow-black/30 overflow-hidden">
       {/* Top action header */}
       <div className="p-4 sm:p-6 border-b border-slate-200 dark:border-slate-800 flex flex-col md:flex-row md:items-center justify-between gap-4">
         <div>
@@ -217,7 +218,7 @@ export const PassportTable: React.FC<PassportTableProps> = ({
               <th className="px-4 py-3 text-right">{t.colActions}</th>
             </tr>
           </thead>
-          <tbody className="divide-y divide-slate-200 dark:divide-slate-800 text-slate-800 dark:text-slate-200">
+          <tbody translate="no" className="notranslate divide-y divide-slate-200 dark:divide-slate-800 text-slate-800 dark:text-slate-200">
             {filtered.map((record, index) => (
               <tr
                 key={record.id}
@@ -239,15 +240,24 @@ export const PassportTable: React.FC<PassportTableProps> = ({
                   {record.birthDate}
                 </td>
                 <td className="px-4 py-3 font-semibold">
-                  <span
-                    className={`inline-block px-2 py-0.5 rounded-md text-[11px] ${
-                      record.gender === 'M'
+                  {(() => {
+                    const effectiveTitle = record.birthDate
+                      ? resolvePassengerTitle(record.birthDate, record.gender)
+                      : record.title;
+                    const badgeClass =
+                      effectiveTitle === 'INF'
+                        ? 'bg-purple-500/15 text-purple-600 dark:text-purple-400 border border-purple-500/30'
+                        : effectiveTitle === 'CHD'
+                        ? 'bg-emerald-500/15 text-emerald-600 dark:text-emerald-400 border border-emerald-500/30'
+                        : record.gender === 'M'
                         ? 'bg-blue-500/10 text-blue-600 dark:text-blue-400'
-                        : 'bg-rose-500/10 text-rose-600 dark:text-rose-400'
-                    }`}
-                  >
-                    {record.title} ({record.gender})
-                  </span>
+                        : 'bg-rose-500/10 text-rose-600 dark:text-rose-400';
+                    return (
+                      <span translate="no" className={`notranslate inline-block px-2 py-0.5 rounded-md text-[11px] font-bold ${badgeClass}`}>
+                        {effectiveTitle} ({record.gender})
+                      </span>
+                    );
+                  })()}
                 </td>
                 <td className="px-4 py-3 font-mono text-slate-600 dark:text-slate-300">
                   {record.expiryDate}
@@ -376,9 +386,16 @@ export const PassportTable: React.FC<PassportTableProps> = ({
                   <input
                     type="text"
                     value={editingRecord.birthDate}
-                    onChange={(e) =>
-                      setEditingRecord({ ...editingRecord, birthDate: e.target.value })
-                    }
+                    onChange={(e) => {
+                      const nextBirth = e.target.value;
+                      setEditingRecord({
+                        ...editingRecord,
+                        birthDate: nextBirth,
+                        title: nextBirth
+                          ? resolvePassengerTitle(nextBirth, editingRecord.gender)
+                          : editingRecord.title,
+                      });
+                    }}
                     className="w-full px-3 py-1.5 text-sm rounded-lg border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-slate-900 dark:text-white"
                     required
                   />
@@ -402,24 +419,26 @@ export const PassportTable: React.FC<PassportTableProps> = ({
               <div className="grid grid-cols-2 gap-3">
                 <div>
                   <label className="block text-xs font-semibold text-slate-600 dark:text-slate-400 mb-1">
-                    Jinsi & MR/MRS
+                    Jinsi & MR/MRS/CHD/INF
                   </label>
                   <select
                     value={`${editingRecord.gender}-${editingRecord.title}`}
                     onChange={(e) => {
-                      const [g, t] = e.target.value.split('-');
+                      const [g, titleVal] = e.target.value.split('-');
                       setEditingRecord({
                         ...editingRecord,
                         gender: g as 'M' | 'F',
-                        title: t as 'MR' | 'MRS' | 'CHD',
+                        title: titleVal as 'MR' | 'MRS' | 'CHD' | 'INF',
                       });
                     }}
                     className="w-full px-3 py-1.5 text-sm rounded-lg border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-slate-900 dark:text-white"
                   >
-                    <option value="M-MR">Erkak (MR)</option>
-                    <option value="F-MRS">Ayol (MRS)</option>
-                    <option value="M-CHD">Bola (Erkak CHD)</option>
-                    <option value="F-CHD">Bola (Qiz CHD)</option>
+                    <option value="M-MR">Erkak (MR, 12+ yosh)</option>
+                    <option value="F-MRS">Ayol (MRS, 12+ yosh)</option>
+                    <option value="M-CHD">Bola O'g'il (CHD, 2-11 yosh)</option>
+                    <option value="F-CHD">Bola Qiz (CHD, 2-11 yosh)</option>
+                    <option value="M-INF">Chaqaloq O'g'il (INF, &lt;2 yosh)</option>
+                    <option value="F-INF">Chaqaloq Qiz (INF, &lt;2 yosh)</option>
                   </select>
                 </div>
                 <div>

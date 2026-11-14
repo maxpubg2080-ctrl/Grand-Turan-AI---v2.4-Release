@@ -7,7 +7,7 @@ export interface PassportRecord {
   surnameLat: string;       // D: Familiya (lat.)
   givenNamesLat: string;    // E: Ism (lat.)
   birthDate: string;        // G: Tugʻ. sana (e.g. "1990-yil 14-may" or "14.05.1990")
-  title: 'MR' | 'MRS' | 'CHD'; // H: MR/MRS/CHD
+  title: 'MR' | 'MRS' | 'CHD' | 'INF'; // H: MR/MRS/CHD/INF
   series: string;           // I: Seria (e.g. "FA", "AA")
   number: string;           // J: № (e.g. "1234567")
   issueDate: string;        // K: Berilgan (e.g. "10.01.2023")
@@ -17,7 +17,7 @@ export interface PassportRecord {
   country: string;          // R: Davlat (e.g. "O'zbekiston")
   rawMrz?: string;
   confidence?: number;
-  engineUsed?: 'gemini-3.8-flash' | 'gemini-2.5-flash' | 'gemini-2.5-pro' | 'tesseract-ocr' | 'offline-mrz' | string;
+  engineUsed?: string;
   parsedAt: string;
 }
 
@@ -55,7 +55,8 @@ export interface AdminSystemStats {
   uptimeSeconds: number;
   nodeVersion: string;
   memoryUsageMb: number;
-  aiEngineStatus: 'active' | 'degraded' | 'offline';
+  aiEngineStatus: 'active' | 'degraded' | 'offline' | 'missing_key';
+  activeEngines?: string[];
   telegramWebhookConfigured: boolean;
   telegramBotUsername: string;
   renderDeployHookConfigured: boolean;

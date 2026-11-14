@@ -9,8 +9,11 @@ import {
   ensureDotDate,
   computeMrzCheckDigit,
   verifyMrzLine2,
+  computeExactAgeYears,
+  resolvePassengerTitle,
 } from './mrzParser';
 import { generatePrestigeWorkbook, generateFlyKhivaWorkbook } from './excelGenerator';
+import { collectProviderKeys } from './aiProviders';
 import { PassportRecord } from '../types/passport';
 
 test('formatUzbekDate formats day, month, and year correctly', () => {
@@ -200,3 +203,103 @@ test('generateFlyKhivaWorkbook matches exact "Список на авиабиле
   assert.equal(sheet.getCell('H8').value, 'UZB');
   assert.equal(sheet.getCell('I8').value, '03.03.2032');
 });
+
+test('resolvePassengerTitle strictly enforces <2 INF, 2-11 CHD, and 12+ MR/MRS boundaries', async () => {
+  const ref = new Date(2026, 10, 14); // 14.11.2026
+
+  // Real case from user screenshot: born 2025-yil 9-dekabr -> 11 months old -> INF
+  assert.equal(computeExactAgeYears('2025-yil 9-dekabr', ref), 0);
+  assert.equal(resolvePassengerTitle('2025-yil 9-dekabr', 'M', ref), 'INF');
+  assert.equal(resolvePassengerTitle('2025-yil 9-dekabr', 'F', ref), 'INF');
+
+  // 1 day before 2nd birthday -> still 1 year old -> INF
+  assert.equal(resolvePassengerTitle('15.11.2024', 'M', ref), 'INF');
+  // Exact 2nd birthday today -> CHD
+  assert.equal(resolvePassengerTitle('14.11.2024', 'M', ref), 'CHD');
+  assert.equal(resolvePassengerTitle('14.11.2024', 'F', ref), 'CHD');
+
+  // 1 day before 12th birthday -> still 11 years old -> CHD
+  assert.equal(resolvePassengerTitle('15.11.2014', 'F', ref), 'CHD');
+  // Exact 12th birthday today -> MR (M) / MRS (F)
+  assert.equal(resolvePassengerTitle('14.11.2014', 'M', ref), 'MR');
+  assert.equal(resolvePassengerTitle('14.11.2014', 'F', ref), 'MRS');
+
+  // Verify Prestige & FlyKhiva workbooks export INF and CHD dynamically
+  const babyAndChild: PassportRecord[] = [
+    {
+      id: 'b1',
+      surname: 'SUNNATILLOEV',
+      givenNames: 'USMON',
+      surnameLat: 'SUNNATILLOEV',
+      givenNamesLat: 'USMON',
+      birthDate: '2025-yil 9-dekabr',
+      title: 'MR', // even if stale MR was saved previously, Excel must resolve to INF
+      series: 'FB',
+      number: '3031444',
+      issueDate: '',
+      expiryDate: '15.10.2028',
+      nationality: "O'zbekiston",
+      gender: 'M',
+      country: "O'zbekiston",
+      parsedAt: new Date().toISOString(),
+    },
+    {
+      id: 'c1',
+      surname: 'KARIMOVA',
+      givenNames: 'MADINA',
+      surnameLat: 'KARIMOVA',
+      givenNamesLat: 'MADINA',
+      birthDate: '2020-yil 10-mart',
+      title: 'MRS',
+      series: 'FA',
+      number: '1122334',
+      issueDate: '',
+      expiryDate: '10.03.2027',
+      nationality: "O'zbekiston",
+      gender: 'F',
+      country: "O'zbekiston",
+      parsedAt: new Date().toISOString(),
+    },
+  ];
+
+  const prestigeWb = await generatePrestigeWorkbook(babyAndChild);
+  const pSheet = prestigeWb.getWorksheet('Лист1')!;
+  assert.equal(pSheet.getCell('H2').value, 'INF');
+  assert.equal(pSheet.getCell('O2').value, 'M');
+  assert.equal(pSheet.getCell('H3').value, 'CHD');
+  assert.equal(pSheet.getCell('O3').value, 'F');
+
+  const flyWb = await generateFlyKhivaWorkbook(babyAndChild);
+  const fSheet = flyWb.getWorksheet('Страница 1')!;
+  assert.equal(fSheet.getCell('D8').value, 'INF');
+  assert.equal(fSheet.getCell('D9').value, 'CHD');
+});
+
+test('collectProviderKeys gathers 3 keys per provider (12 total) and skips placeholders', () => {
+  const mockEnv: Record<string, string | undefined> = {
+    GEMINI_API_KEY: 'MY_GEMINI_API_KEY',
+    GEMINI_API_KEY_1: '"AIzaSyTestKeyOne12345"',
+    GEMINI_API_KEY_2: 'AIzaSyTestKeyTwo12345',
+    GEMINI_API_KEY_3: 'AIzaSyTestKeyThree123',
+    GROQ_API_KEY: 'gsk_test_one_123456',
+    GROQ_API_KEY_2: 'gsk_test_two_123456',
+    GROQ_API_KEY_3: 'gsk_test_three_123456',
+    OPENROUTER_API_KEYS: 'sk-or-v1-alpha123456, sk-or-v1-beta123456, sk-or-v1-gamma123456',
+    MISTRAL_API_KEY: 'mistral_key_one_1234',
+    MISTRAL_API_KEY_2: 'mistral_key_two_1234',
+    MISTRAL_API_KEY_3: 'mistral_key_three_1234',
+  };
+
+  const gemini = collectProviderKeys(mockEnv, 'GEMINI');
+  const groq = collectProviderKeys(mockEnv, 'GROQ');
+  const openrouter = collectProviderKeys(mockEnv, 'OPENROUTER');
+  const mistral = collectProviderKeys(mockEnv, 'MISTRAL');
+
+  assert.equal(gemini.length, 3);
+  assert.equal(gemini[0], 'AIzaSyTestKeyOne12345');
+  assert.equal(groq.length, 3);
+  assert.equal(openrouter.length, 3);
+  assert.equal(mistral.length, 3);
+  assert.equal(gemini.length + groq.length + openrouter.length + mistral.length, 12);
+});
+

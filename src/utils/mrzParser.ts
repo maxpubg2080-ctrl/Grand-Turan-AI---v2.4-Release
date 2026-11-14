@@ -65,6 +65,81 @@ export function ensureDotDate(dateStr: string): string {
   return trimmed;
 }
 
+export interface DateParts {
+  year: number;
+  month: number;
+  day: number;
+}
+
+/**
+ * Extracts day/month/year from DD.MM.YYYY, YYYY-MM-DD, or Uzbek "YYYY-yil D-oy"
+ */
+export function parseAnyDateParts(dateStr: string): DateParts | null {
+  const dot = ensureDotDate(dateStr);
+  const m = dot.match(/^(\d{2})\.(\d{2})\.(\d{4})$/);
+  if (!m) return null;
+  const day = parseInt(m[1], 10);
+  const month = parseInt(m[2], 10);
+  const year = parseInt(m[3], 10);
+  if (month < 1 || month > 12 || day < 1 || day > 31 || year < 1900 || year > 2100) {
+    return null;
+  }
+  return { year, month, day };
+}
+
+/**
+ * Computes completed years of age on referenceDate (defaults to today).
+ */
+export function computeExactAgeYears(
+  birthDateStr: string,
+  referenceDate: Date | string = new Date()
+): number | null {
+  const dob = parseAnyDateParts(birthDateStr);
+  if (!dob) return null;
+
+  let ref: DateParts;
+  if (typeof referenceDate === 'string') {
+    const parsedRef = parseAnyDateParts(referenceDate);
+    if (parsedRef) {
+      ref = parsedRef;
+    } else {
+      const now = new Date();
+      ref = { year: now.getFullYear(), month: now.getMonth() + 1, day: now.getDate() };
+    }
+  } else {
+    ref = {
+      year: referenceDate.getFullYear(),
+      month: referenceDate.getMonth() + 1,
+      day: referenceDate.getDate(),
+    };
+  }
+
+  let age = ref.year - dob.year;
+  if (ref.month < dob.month || (ref.month === dob.month && ref.day < dob.day)) {
+    age -= 1;
+  }
+  return age;
+}
+
+/**
+ * Resolves aviation passenger title strictly by age on referenceDate:
+ * - Strictly under 2 years (age < 2): "INF"
+ * - Reached 2nd birthday, strictly under 12 (2 <= age < 12): "CHD"
+ * - Reached 12th birthday or older (age >= 12): "MR" (M) or "MRS" (F)
+ */
+export function resolvePassengerTitle(
+  birthDateStr: string,
+  gender: 'M' | 'F',
+  referenceDate: Date | string = new Date()
+): 'MR' | 'MRS' | 'CHD' | 'INF' {
+  const age = computeExactAgeYears(birthDateStr, referenceDate);
+  if (age !== null) {
+    if (age < 2) return 'INF';
+    if (age < 12) return 'CHD';
+  }
+  return gender === 'F' ? 'MRS' : 'MR';
+}
+
 /**
  * Computes ICAO 9303 Mod-10 check digit (weights 7, 3, 1)
  */
@@ -195,7 +270,7 @@ export function parseMrzLines(rawText: string): PassportRecord | null {
   // Sex: char 20
   const sexChar = line2.charAt(20);
   const gender: 'M' | 'F' = sexChar === 'F' ? 'F' : 'M';
-  const title: 'MR' | 'MRS' = gender === 'M' ? 'MR' : 'MRS';
+  const title = resolvePassengerTitle(birthDate, gender);
 
   // Expiration date: chars 21..27 (YYMMDD)
   const expYY = line2.substring(21, 23);
@@ -318,7 +393,7 @@ export function parsePassportTextRegex(text: string): PassportRecord | null {
   // Gender detection
   const isFemale = /\b(female|ayol|жен|женский)\b/i.test(text);
   const gender: 'M' | 'F' = isFemale ? 'F' : 'M';
-  const title: 'MR' | 'MRS' = gender === 'M' ? 'MR' : 'MRS';
+  const title = resolvePassengerTitle(birthDate, gender);
 
   return {
     id: `pass_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,

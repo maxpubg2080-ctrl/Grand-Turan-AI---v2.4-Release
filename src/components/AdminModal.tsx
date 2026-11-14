@@ -445,12 +445,12 @@ export const AdminModal: React.FC<AdminModalProps> = ({
                       )}
                     </div>
 
-                    {/* Server-side AI Status (Configured via Environment Secrets) */}
+                    {/* Server-side Multi-AI Cascade Status (Configured via Environment Secrets) */}
                     <div className="p-4 rounded-xl bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 space-y-2 md:col-span-2">
                       <div className="flex items-center justify-between">
                         <span className="text-xs font-bold text-slate-800 dark:text-slate-200 flex items-center gap-1.5">
                           <Cpu className="w-4 h-4 text-amber-500" />
-                          Gemini AI Vision Dvigateli (gemini-4-hydrogen)
+                          Multi-AI Zaxira Kaskadi (Avtomatik O'tish)
                         </span>
                         <span
                           className={`text-[10px] font-bold px-2.5 py-0.5 rounded-full ${
@@ -460,12 +460,24 @@ export const AdminModal: React.FC<AdminModalProps> = ({
                           }`}
                         >
                           {stats?.aiEngineStatus === 'active'
-                            ? '● Server Kaliti Faol'
-                            : '○ GEMINI_API_KEY Sozlanmagan'}
+                            ? '● Server Dvigatellari Faol'
+                            : '○ AI Kaliti Sozlanmagan'}
                         </span>
                       </div>
+                      {stats?.activeEngines && stats.activeEngines.length > 0 && (
+                        <div className="flex flex-wrap gap-1.5 pt-0.5">
+                          {stats.activeEngines.map((engine) => (
+                            <span
+                              key={engine}
+                              className="text-[10px] font-mono px-2 py-0.5 rounded-md bg-slate-100 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-300"
+                            >
+                              {engine}
+                            </span>
+                          ))}
+                        </div>
+                      )}
                       <p className="text-[11px] text-slate-500 dark:text-slate-400">
-                        Xavfsizlik talablariga muvofiq <code className="font-mono">GEMINI_API_KEY</code> faqat server muhitida (AI Studio <b>Settings &gt; Secrets</b> yoki Render <b>Environment Variables</b>) saqlanadi.
+                        Agar bir kalit yoki modelning kunlik limiti tugasa, server avtomatik keyingisiga o'tadi: har bir provayderdan 3 tadan — <code className="font-mono">GEMINI_API_KEY</code> (<code className="font-mono">_2, _3</code>), <code className="font-mono">GROQ_API_KEY</code> (<code className="font-mono">_2, _3</code>), <code className="font-mono">OPENROUTER_API_KEY</code> (<code className="font-mono">_2, _3</code>), <code className="font-mono">MISTRAL_API_KEY</code> (<code className="font-mono">_2, _3</code>) — jami 12+ kalit qo'llab-quvvatlanadi.
                       </p>
                     </div>
                   </div>
@@ -592,14 +604,55 @@ git push -u origin main`}
                     </span>
                     Environment Variables (Atrof-muhit o'zgaruvchilari)
                   </h4>
-                  <div className="pl-7 space-y-2">
+                  <div className="pl-7 space-y-2.5">
                     <p className="text-xs text-slate-600 dark:text-slate-400">
-                      Render boshqaruv panelida <b>Environment Variables</b> bo'limiga quyidagilarni kiriting:
+                      Render boshqaruv panelida <b>Environment Variables</b> bo'limiga quyidagi 12 tagacha kalitni kiriting (kuniga 100+ pasport bepul):
                     </p>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-1.5 text-[11px]">
+                      <a
+                        href="https://aistudio.google.com/apikey"
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="flex items-center justify-between px-2.5 py-1.5 rounded-lg bg-amber-500/10 text-amber-700 dark:text-amber-300 border border-amber-500/20 hover:bg-amber-500/20 transition-colors"
+                      >
+                        <span>1. Google AI Studio (3 ta alohida loyiha)</span>
+                        <ExternalLink className="w-3 h-3 shrink-0" />
+                      </a>
+                      <a
+                        href="https://console.groq.com/keys"
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="flex items-center justify-between px-2.5 py-1.5 rounded-lg bg-sky-500/10 text-sky-700 dark:text-sky-300 border border-sky-500/20 hover:bg-sky-500/20 transition-colors"
+                      >
+                        <span>2. Groq Console (~1000/kun bepul)</span>
+                        <ExternalLink className="w-3 h-3 shrink-0" />
+                      </a>
+                      <a
+                        href="https://openrouter.ai/keys"
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="flex items-center justify-between px-2.5 py-1.5 rounded-lg bg-indigo-500/10 text-indigo-700 dark:text-indigo-300 border border-indigo-500/20 hover:bg-indigo-500/20 transition-colors"
+                      >
+                        <span>3. OpenRouter (:free vision)</span>
+                        <ExternalLink className="w-3 h-3 shrink-0" />
+                      </a>
+                      <a
+                        href="https://console.mistral.ai/api-keys"
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="flex items-center justify-between px-2.5 py-1.5 rounded-lg bg-emerald-500/10 text-emerald-700 dark:text-emerald-300 border border-emerald-500/20 hover:bg-emerald-500/20 transition-colors"
+                      >
+                        <span>4. Mistral Console (Pixtral)</span>
+                        <ExternalLink className="w-3 h-3 shrink-0" />
+                      </a>
+                    </div>
                     <div className="font-mono text-[11px] p-2.5 rounded-lg bg-slate-900 text-slate-200 space-y-1">
                       <div>PORT = 3000</div>
                       <div>NODE_ENV = production</div>
-                      <div>GEMINI_API_KEY = &lt;Sizning AI Studio kalitingiz&gt;</div>
+                      <div>GEMINI_API_KEY / GEMINI_API_KEY_2 / GEMINI_API_KEY_3</div>
+                      <div>GROQ_API_KEY / GROQ_API_KEY_2 / GROQ_API_KEY_3</div>
+                      <div>OPENROUTER_API_KEY / OPENROUTER_API_KEY_2 / OPENROUTER_API_KEY_3</div>
+                      <div>MISTRAL_API_KEY / MISTRAL_API_KEY_2 / MISTRAL_API_KEY_3</div>
                       <div>TELEGRAM_BOT_TOKEN = &lt;BotFather tokeni&gt;</div>
                       <div>RENDER_DEPLOY_HOOK_URL = &lt;Settings -&gt; Deploy Hook URL&gt;</div>
                     </div>

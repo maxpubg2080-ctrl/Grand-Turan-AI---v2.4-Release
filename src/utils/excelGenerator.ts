@@ -1,6 +1,6 @@
 import ExcelJS from 'exceljs';
 import { PassportRecord, FlightDetails } from '../types/passport';
-import { ensureDotDate } from './mrzParser';
+import { ensureDotDate, resolvePassengerTitle } from './mrzParser';
 
 /**
  * Creates ExcelJS Workbook for Prestige / TAS SHARM format
@@ -79,6 +79,10 @@ export async function generatePrestigeWorkbook(records: PassportRecord[]): Promi
     const nationalityStr = isUzb ? 'Узбекистан' : record.nationality || 'Узбекистан';
     const countryStr = isUzb ? 'Узбекистан' : record.country || 'Узбекистан';
 
+    const computedTitle = record.birthDate
+      ? resolvePassengerTitle(record.birthDate, record.gender || 'M')
+      : record.title || (record.gender === 'M' ? 'MR' : 'MRS');
+
     row.getCell(1).value = (record.surname || '').toUpperCase();
     row.getCell(2).value = (record.givenNames || '').toUpperCase();
     row.getCell(3).value = ''; // C: Otчество — bo'sh (umuman kerak emas)
@@ -86,7 +90,7 @@ export async function generatePrestigeWorkbook(records: PassportRecord[]): Promi
     row.getCell(5).value = (record.givenNamesLat || record.givenNames || '').toUpperCase();
     row.getCell(6).value = ''; // F: Otчество по-латински — bo'sh
     row.getCell(7).value = birthDot;
-    row.getCell(8).value = record.title || (record.gender === 'M' ? 'MR' : 'MRS');
+    row.getCell(8).value = computedTitle;
     row.getCell(9).value = (record.series || 'FA').toUpperCase();
     row.getCell(10).value = record.number || '';
     row.getCell(11).value = issueDot;
@@ -259,10 +263,14 @@ export async function generateFlyKhivaWorkbook(
     else if (natUpper.includes('KAZ')) grazhd = 'KAZ';
     else if (natUpper.includes('RUS')) grazhd = 'RUS';
 
+    const computedTitle = record.birthDate
+      ? resolvePassengerTitle(record.birthDate, record.gender || 'M')
+      : record.title || (record.gender === 'M' ? 'MR' : 'MRS');
+
     row.getCell(1).value = idx + 1;                                      // A: №
     row.getCell(2).value = fullName;                                     // B: Фамилия, имя
     row.getCell(3).value = '';                                           // C: (bo'sh)
-    row.getCell(4).value = record.title || (record.gender === 'M' ? 'MR' : 'MRS'); // D: Пол
+    row.getCell(4).value = computedTitle;                                // D: Пол (MR/MRS/CHD/INF)
     row.getCell(5).value = birthDot;                                     // E: Дата Рождения
     row.getCell(6).value = passportFullNumber;                           // F: № паспорта
     row.getCell(7).value = 'Y';                                          // G: Класс (Y)

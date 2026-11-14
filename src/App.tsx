@@ -183,10 +183,10 @@ export default function App() {
     <div
       className={`min-h-screen relative flex flex-col font-sans transition-colors duration-500 ${
         theme === 'qunduzgi'
-          ? 'bg-slate-50 text-slate-900'
+          ? 'bg-[#f4f7fb] bg-[radial-gradient(ellipse_at_top,_rgba(245,158,11,0.09),_transparent_52%),radial-gradient(ellipse_at_top_right,_rgba(14,165,233,0.08),_transparent_48%)] text-slate-900'
           : theme === 'fazo'
-          ? 'bg-[#060b14] text-slate-100'
-          : 'bg-slate-950 text-slate-100'
+          ? 'bg-[#030712] text-slate-100'
+          : 'bg-[#0a101e] text-slate-100'
       }`}
     >
       {/* Animated Space Cosmic Canvas for 'fazo' theme */}
@@ -225,15 +225,15 @@ export default function App() {
       {/* Hero Banner with Quick Stats & Navigation */}
       <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-6 space-y-6 relative z-10">
         {/* Top Hero Card */}
-        <div className="rounded-3xl p-6 sm:p-8 bg-gradient-to-r from-amber-500/10 via-sky-500/10 to-indigo-500/10 border border-slate-200/80 dark:border-slate-800/80 backdrop-blur-md relative overflow-hidden">
+        <div className="rounded-3xl p-6 sm:p-8 bg-white/85 dark:bg-slate-900/65 bg-gradient-to-br from-amber-500/[0.08] via-white/40 to-sky-500/[0.08] dark:from-amber-500/[0.09] dark:via-slate-900/40 dark:to-indigo-500/[0.12] border border-slate-200/90 dark:border-slate-700/60 shadow-lg shadow-slate-900/5 dark:shadow-black/30 backdrop-blur-xl relative overflow-hidden">
           <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-6">
-            <div className="space-y-2 max-w-2xl">
-              <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full text-xs font-bold bg-amber-500/20 text-amber-600 dark:text-amber-400 border border-amber-500/30">
+            <div className="space-y-2.5 max-w-2xl">
+              <div className="inline-flex items-center gap-2 text-xs font-extrabold tracking-wide uppercase text-amber-700 dark:text-amber-400">
                 <span>⚜️ 100% Rasmiy Shablonda</span>
-                <span>•</span>
-                <span>TAS SHARM & Avia Biletlar</span>
+                <span className="text-slate-400 dark:text-slate-600">·</span>
+                <span className="text-sky-700 dark:text-sky-300">TAS SHARM & Avia Biletlar</span>
               </div>
-              <h2 className="text-2xl sm:text-3xl font-black tracking-tight text-slate-900 dark:text-white">
+              <h2 className="text-2xl sm:text-3xl font-black tracking-tight text-slate-900 dark:text-white leading-tight">
                 Pasportlarni Sun'iy Intellekt va MRZ bilan Excelga aylantiring
               </h2>
               <p className="text-xs sm:text-sm text-slate-600 dark:text-slate-300 leading-relaxed">
@@ -243,7 +243,7 @@ export default function App() {
 
             {/* Quick Actions & Counter */}
             <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-3">
-              <div className="px-5 py-3.5 rounded-2xl bg-white/80 dark:bg-slate-900/80 border border-slate-200 dark:border-slate-800 shadow-sm text-center">
+              <div className="px-5 py-3.5 rounded-2xl bg-white/90 dark:bg-slate-950/75 border border-slate-200/90 dark:border-slate-700/70 shadow-sm text-center">
                 <span className="text-[11px] font-semibold text-slate-500 dark:text-slate-400 block">
                   Yuklangan pasportlar
                 </span>
@@ -345,6 +345,7 @@ export default function App() {
               <TelegramChatStream
                 lang={lang}
                 passports={passports}
+                onAddPassports={handleAddPassports}
                 onExportExcel={handleExportExcel}
                 onExportZip={handleExportZip}
                 onClear={handleClearPassports}
@@ -367,6 +368,7 @@ export default function App() {
             <TelegramChatStream
               lang={lang}
               passports={passports}
+              onAddPassports={handleAddPassports}
               onExportExcel={handleExportExcel}
               onExportZip={handleExportZip}
               onClear={handleClearPassports}
