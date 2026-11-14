@@ -62,8 +62,14 @@ export const AdminModal: React.FC<AdminModalProps> = ({
   const [botToken, setBotToken] = useState('');
   const [deployHookUrl, setDeployHookUrl] = useState('');
   const [deploying, setDeploying] = useState(false);
-  const [deployResult, setDeployResult] = useState<string | null>(null);
-  const [settingsSuccess, setSettingsSuccess] = useState(false);
+  const [deployStatus, setDeployStatus] = useState<{ ok: boolean; text: string } | null>(null);
+  const [savingSettings, setSavingSettings] = useState(false);
+  const [webhookStatus, setWebhookStatus] = useState<{ ok: boolean; text: string } | null>(null);
+
+  const webhookEndpoint =
+    typeof window !== 'undefined'
+      ? `${window.location.origin}/api/telegram/webhook`
+      : 'https://<RENDER_HOST>/api/telegram/webhook';
 
   const fetchStats = async () => {
     try {
@@ -100,8 +106,19 @@ export const AdminModal: React.FC<AdminModalProps> = ({
     setTimeout(() => setCopiedKey(null), 2500);
   };
 
-  const handleSaveSettings = async (e: React.FormEvent) => {
-    e.preventDefault();
+  const handleSaveSettings = async (e?: React.FormEvent, withWebhook = true) => {
+    if (e) e.preventDefault();
+    const setTargetStatus = withWebhook ? setWebhookStatus : setDeployStatus;
+    if (withWebhook && !botToken.trim() && !stats?.telegramWebhookConfigured) {
+      setWebhookStatus({ ok: false, text: "Avval @BotFather tokenini kiriting" });
+      return;
+    }
+    if (!withWebhook && !deployHookUrl.trim()) {
+      setDeployStatus({ ok: false, text: "⚠️ Avval Render Deploy Hook URL kiriting" });
+      return;
+    }
+    setSavingSettings(true);
+    setTargetStatus(null);
     try {
       const res = await fetch('/api/admin/settings', {
         method: 'POST',
@@ -110,36 +127,52 @@ export const AdminModal: React.FC<AdminModalProps> = ({
           pin: pinCode || '1111',
           newBotToken: botToken,
           newDeployHookUrl: deployHookUrl,
+          registerWebhook: withWebhook,
         }),
       });
       const data = await res.json();
-      if (data.success) {
-        setSettingsSuccess(true);
-        setTimeout(() => setSettingsSuccess(false), 3000);
+      if (res.ok && data.success) {
+        setTargetStatus({
+          ok: true,
+          text: withWebhook
+            ? `✓ ${data.message || 'Webhook muvaffaqiyatli ulandi!'}`
+            : '✓ Hook saqlandi (/redeploy tayyor)',
+        });
         fetchStats();
+      } else {
+        setTargetStatus({
+          ok: false,
+          text: `⚠️ ${data.message || data.error || 'Sozlamani saqlashda xatolik'}`,
+        });
       }
-    } catch (err) {
-      console.error(err);
+    } catch (err: any) {
+      setTargetStatus({ ok: false, text: `❌ ${err.message}` });
+    } finally {
+      setSavingSettings(false);
     }
   };
 
   const handleTriggerDeploy = async () => {
     setDeploying(true);
-    setDeployResult(null);
+    setDeployStatus(null);
     try {
       const res = await fetch('/api/admin/deploy', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ pin: pinCode || '1111' }),
+        body: JSON.stringify({
+          pin: pinCode || '1111',
+          deployHookUrl: deployHookUrl.trim(),
+        }),
       });
       const data = await res.json();
-      if (data.success) {
-        setDeployResult('✅ Render qayta ishga tushirildi! Updater faol.');
+      if (res.ok && data.success) {
+        setDeployStatus({ ok: true, text: `✅ ${data.message || 'Render qayta ishga tushirildi!'}` });
+        fetchStats();
       } else {
-        setDeployResult(`⚠️ ${data.error || 'Deploy xatosi'}`);
+        setDeployStatus({ ok: false, text: `⚠️ ${data.error || 'Deploy Hook xatosi'}` });
       }
     } catch (err: any) {
-      setDeployResult(`❌ ${err.message}`);
+      setDeployStatus({ ok: false, text: `❌ ${err.message}` });
     } finally {
       setDeploying(false);
     }
@@ -167,8 +200,10 @@ export const AdminModal: React.FC<AdminModalProps> = ({
           </div>
 
           <button
+            type="button"
             onClick={onClose}
-            className="p-2 rounded-xl text-slate-400 hover:text-slate-600 dark:hover:text-white hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors"
+            aria-label="Admin panelni yopish"
+            className="p-2 rounded-xl text-slate-400 hover:text-slate-600 dark:hover:text-white hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors cursor-pointer"
           >
             <X className="w-5 h-5" />
           </button>
@@ -302,70 +337,112 @@ export const AdminModal: React.FC<AdminModalProps> = ({
                     {/* Render Deploy Hook */}
                     <div className="p-4 rounded-xl bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 space-y-2">
                       <div className="flex items-center justify-between">
-                        <span className="text-xs font-bold text-slate-800 dark:text-slate-200">
+                        <label htmlFor="render-deploy-hook-input" className="text-xs font-bold text-slate-800 dark:text-slate-200">
                           Render Deploy Hook (Updater)
-                        </span>
-                        <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-amber-500/10 text-amber-600">
-                          Auto-Redeploy
+                        </label>
+                        <span
+                          className={`text-[10px] font-mono px-2 py-0.5 rounded ${
+                            stats?.renderDeployHookConfigured
+                              ? 'bg-emerald-500/15 text-emerald-600 dark:text-emerald-400'
+                              : 'bg-amber-500/10 text-amber-600'
+                          }`}
+                        >
+                          {stats?.renderDeployHookConfigured ? '● Ulangan' : 'Auto-Redeploy'}
                         </span>
                       </div>
                       <input
+                        id="render-deploy-hook-input"
                         type="url"
                         placeholder="https://api.render.com/deploy/srv-..."
                         value={deployHookUrl}
-                        onChange={(e) => setDeployHookUrl(e.target.value)}
+                        onChange={(e) => {
+                          setDeployHookUrl(e.target.value);
+                          setDeployStatus(null);
+                        }}
                         className="w-full text-xs font-mono px-3 py-2 rounded-lg border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-900 text-slate-900 dark:text-white"
                       />
-                      <div className="flex items-center justify-between pt-1">
+                      <div className="flex flex-wrap items-center gap-2 pt-1">
+                        <button
+                          type="button"
+                          onClick={() => handleSaveSettings(undefined, false)}
+                          disabled={savingSettings}
+                          className="px-3 py-1.5 rounded-lg text-xs font-bold bg-slate-200 hover:bg-slate-300 dark:bg-slate-700 dark:hover:bg-slate-600 text-slate-800 dark:text-slate-100 transition-all cursor-pointer disabled:opacity-50"
+                        >
+                          Saqlash
+                        </button>
                         <button
                           type="button"
                           onClick={handleTriggerDeploy}
                           disabled={deploying}
-                          className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold bg-amber-500 hover:bg-amber-600 text-white transition-all disabled:opacity-50"
+                          className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold bg-amber-500 hover:bg-amber-600 text-white transition-all disabled:opacity-50 cursor-pointer"
                         >
                           <RefreshCw className={`w-3.5 h-3.5 ${deploying ? 'animate-spin' : ''}`} />
                           <span>Qayta yangilash (/redeploy)</span>
                         </button>
-                        {deployResult && (
-                          <span className="text-[11px] font-semibold text-emerald-500">
-                            {deployResult}
-                          </span>
-                        )}
                       </div>
+                      {deployStatus && (
+                        <p
+                          role="status"
+                          className={`text-[11px] font-semibold break-words ${
+                            deployStatus.ok ? 'text-emerald-600 dark:text-emerald-400' : 'text-rose-600 dark:text-rose-400'
+                          }`}
+                        >
+                          {deployStatus.text}
+                        </p>
+                      )}
                     </div>
 
                     {/* Telegram Bot Webhook Config */}
                     <div className="p-4 rounded-xl bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 space-y-2">
                       <div className="flex items-center justify-between">
-                        <span className="text-xs font-bold text-slate-800 dark:text-slate-200">
+                        <label htmlFor="telegram-bot-token-input" className="text-xs font-bold text-slate-800 dark:text-slate-200">
                           Telegram Bot Token
-                        </span>
-                        <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-sky-500/10 text-sky-600">
-                          @grandturanai_bot
+                        </label>
+                        <span
+                          className={`text-[10px] font-mono px-2 py-0.5 rounded ${
+                            stats?.telegramWebhookConfigured
+                              ? 'bg-emerald-500/15 text-emerald-600 dark:text-emerald-400'
+                              : 'bg-sky-500/10 text-sky-600'
+                          }`}
+                        >
+                          {stats?.telegramWebhookConfigured ? '● Bot Faol' : '@grandturanai_bot'}
                         </span>
                       </div>
                       <input
+                        id="telegram-bot-token-input"
                         type="text"
                         placeholder="7123456789:AAH..."
                         value={botToken}
-                        onChange={(e) => setBotToken(e.target.value)}
+                        onChange={(e) => {
+                          setBotToken(e.target.value);
+                          setWebhookStatus(null);
+                        }}
                         className="w-full text-xs font-mono px-3 py-2 rounded-lg border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-900 text-slate-900 dark:text-white"
                       />
+                      <div className="text-[10px] font-mono text-slate-500 dark:text-slate-400 truncate" title={webhookEndpoint}>
+                        Endpoint: {webhookEndpoint}
+                      </div>
                       <div className="flex items-center justify-between pt-1">
                         <button
                           type="button"
-                          onClick={handleSaveSettings}
-                          className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold bg-sky-600 hover:bg-sky-700 text-white transition-all"
+                          onClick={() => handleSaveSettings(undefined, true)}
+                          disabled={savingSettings}
+                          className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold bg-sky-600 hover:bg-sky-700 text-white transition-all disabled:opacity-50 cursor-pointer"
                         >
-                          <Bot className="w-3.5 h-3.5" />
-                          <span>Webhook Ulash</span>
+                          <Bot className={`w-3.5 h-3.5 ${savingSettings ? 'animate-pulse' : ''}`} />
+                          <span>{savingSettings ? 'Ulanmoqda...' : 'Webhook Ulash'}</span>
                         </button>
-                        {settingsSuccess && (
-                          <span className="text-[11px] font-semibold text-emerald-500">
-                            ✓ Saqlandi
-                          </span>
-                        )}
                       </div>
+                      {webhookStatus && (
+                        <p
+                          role="status"
+                          className={`text-[11px] font-semibold break-all ${
+                            webhookStatus.ok ? 'text-emerald-600 dark:text-emerald-400' : 'text-rose-600 dark:text-rose-400'
+                          }`}
+                        >
+                          {webhookStatus.text}
+                        </p>
+                      )}
                     </div>
 
                     {/* Server-side AI Status (Configured via Environment Secrets) */}

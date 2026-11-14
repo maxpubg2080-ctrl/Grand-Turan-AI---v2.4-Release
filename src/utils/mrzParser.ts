@@ -66,6 +66,42 @@ export function ensureDotDate(dateStr: string): string {
 }
 
 /**
+ * Computes ICAO 9303 Mod-10 check digit (weights 7, 3, 1)
+ */
+export function computeMrzCheckDigit(field: string): string {
+  const weights = [7, 3, 1];
+  let sum = 0;
+  for (let i = 0; i < field.length; i++) {
+    const ch = field.charAt(i).toUpperCase();
+    let val = 0;
+    if (ch >= '0' && ch <= '9') {
+      val = ch.charCodeAt(0) - 48;
+    } else if (ch >= 'A' && ch <= 'Z') {
+      val = ch.charCodeAt(0) - 55;
+    } else if (ch === '<') {
+      val = 0;
+    }
+    sum += val * weights[i % 3];
+  }
+  return String(sum % 10);
+}
+
+export interface MrzChecksumStatus {
+  numberValid: boolean;
+  dobValid: boolean;
+  expiryValid: boolean;
+}
+
+export function verifyMrzLine2(line2: string): MrzChecksumStatus {
+  const padded = (line2 || '').toUpperCase().padEnd(44, '<');
+  return {
+    numberValid: computeMrzCheckDigit(padded.substring(0, 9)) === padded.charAt(9),
+    dobValid: computeMrzCheckDigit(padded.substring(13, 19)) === padded.charAt(19),
+    expiryValid: computeMrzCheckDigit(padded.substring(21, 27)) === padded.charAt(27),
+  };
+}
+
+/**
  * Removes Uzbek/Russian patronymics from given names (e.g. "SARDOR ALISHER O'G'LI" -> "SARDOR")
  */
 export function stripPatronymic(given: string): string {
@@ -78,7 +114,6 @@ export function stripPatronymic(given: string): string {
   const patronymicMarkers = new Set(["O'G'LI", 'OGLI', "O`G`LI", 'OʻGʻLI', 'UGLI', 'QIZI', 'KIZI']);
   const last = tokens[tokens.length - 1];
   if (patronymicMarkers.has(last)) {
-    // Usually "<GIVEN> <FATHER> O'G'LI" -> take only first token
     return tokens[0];
   }
   if (/(?:OVICH|EVICH|VICH|OVNA|EVNA|QIZI|OGLI)$/i.test(last)) {
@@ -93,7 +128,7 @@ export function stripPatronymic(given: string): string {
 export function parseMrzLines(rawText: string): PassportRecord | null {
   if (!rawText) return null;
 
-  // Clean lines, looking for two lines of approximately 44 characters starting with P<
+  // Clean lines, looking for two lines starting with P<
   const lines = rawText
     .split(/\r?\n/)
     .map((l) => l.trim().toUpperCase().replace(/\s+/g, ''))

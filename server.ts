@@ -14,6 +14,7 @@ import { GoogleGenAI, Type, ThinkingLevel } from '@google/genai';
 import JSZip from 'jszip';
 import {
   parseMrzLines,
+  verifyMrzLine2,
   stripPatronymic,
   ensureDotDate,
 } from './src/utils/mrzParser.ts';
@@ -139,15 +140,16 @@ async function parsePassportImage(
   const systemPrompt = `You are a strict, 100% truthful passport data extraction OCR engine.
 CRITICAL RULES:
 1. Read ONLY the actual text and 2-line MRZ printed on the provided passport image. NEVER guess, invent, or substitute placeholder names or numbers.
-2. If the image is NOT a passport or is completely illegible so surname or passport number cannot be read, set errorReason to a brief explanation and leave surname/number empty.
-3. NEVER include patronymic / middle name / father's name (otasining ismi, e.g., O'G'LI, QIZI, OGLI, KIZI, -VICH, -OVNA) in givenNames or givenNamesLat. Output strictly the Surname and First Given Name only.
-4. Read the 2-line MRZ at the bottom verbatim into rawMrz if visible, and use it to verify spelling, passport series/number, birthDate, gender, and expiryDate.
-5. Format dates precisely:
-   - birthDate: Uzbek format "YYYY-yil D-oy" (lowercase months: yanvar, fevral, mart, aprel, may, iyun, iyul, avgust, sentabr, oktabr, noyabr, dekabr, e.g. "1992-yil 5-may").
+2. CHARACTER-BY-CHARACTER ACCURACY: Compare every single letter of Surname, Given Name, Series, Number, Birth Date, and Expiry Date between the visual bio-page AND the bottom 2-line OCR-B MRZ string. Watch carefully for easily confused characters (KH vs X, I vs Y, IY vs I, O vs 0, B vs 8, S vs 5, Z vs 2, U vs V). Use the OCR-B MRZ line at the bottom as your primary spelling reference.
+3. If the image is NOT a passport or is completely illegible so surname or passport number cannot be read, set errorReason to a brief explanation and leave surname/number empty.
+4. NEVER include patronymic / middle name / father's name (otasining ismi, e.g., O'G'LI, QIZI, OGLI, KIZI, -VICH, -OVNA, ABDULKHAMIDOVICH) in givenNames or givenNamesLat. Output strictly the Surname and First Given Name only.
+5. Read the 2-line MRZ at the bottom verbatim into rawMrz (preserve exact 44 characters per line including '<' separators and digits).
+6. Format dates precisely:
+   - birthDate: Uzbek format "YYYY-yil D-oy" (lowercase months: yanvar, fevral, mart, aprel, may, iyun, iyul, avgust, sentabr, oktabr, noyabr, dekabr, e.g. "1986-yil 7-may").
    - issueDate: "DD.MM.YYYY" (leave "" if not printed on document).
    - expiryDate: "DD.MM.YYYY".
-6. Extract series (2-3 uppercase letters, e.g. FA, AA, AB) and number (digits, e.g. 5142207) separately.
-7. title must be "MR" for male (M), "MRS" for female (F), or "CHD" if explicitly minor/child.`;
+7. Extract series (2-3 uppercase letters, e.g. FA, AA, AB) and number (digits, e.g. 3832280) separately.
+8. title must be "MR" for male (M), "MRS" for female (F), or "CHD" if explicitly minor/child.`;
 
   const config: Record<string, any> = {
     systemInstruction: systemPrompt,
@@ -174,7 +176,7 @@ CRITICAL RULES:
       required: ['surname', 'givenNames', 'series', 'number'],
     },
     thinkingConfig: {
-      thinkingLevel: useThinking ? ThinkingLevel.HIGH : ThinkingLevel.LOW,
+      thinkingLevel: ThinkingLevel.HIGH,
     },
   };
 
@@ -227,13 +229,25 @@ CRITICAL RULES:
 
   const rawMrz = String(parsedJson.rawMrz || '').trim();
   const mrzCheck = rawMrz ? parseMrzLines(rawMrz) : null;
+  const mrzLine2 = mrzCheck?.rawMrz?.split('\n')[1] || '';
+  const mrzChecks = mrzLine2 ? verifyMrzLine2(mrzLine2) : { numberValid: false, dobValid: false, expiryValid: false };
+  const mrzLine1 = mrzCheck?.rawMrz?.split('\n')[0] || '';
+  const mrzHasCleanNameDelimiter = mrzLine1.includes('<<') && (mrzLine1.split('<<')[1] || '').includes('<');
 
-  const surname = String(parsedJson.surname || mrzCheck?.surname || '')
-    .toUpperCase()
-    .trim();
-  const givenNames = stripPatronymic(
-    String(parsedJson.givenNames || mrzCheck?.givenNames || '')
-  );
+  // Prefer mathematically checksum-verified MRZ fields when available
+  const visualSurname = String(parsedJson.surname || '').toUpperCase().trim();
+  const visualGiven = stripPatronymic(String(parsedJson.givenNames || ''));
+
+  const surname =
+    mrzChecks.numberValid && mrzHasCleanNameDelimiter && mrzCheck?.surname
+      ? mrzCheck.surname
+      : visualSurname || mrzCheck?.surname || '';
+
+  const givenNames =
+    mrzChecks.numberValid && mrzHasCleanNameDelimiter && mrzCheck?.givenNames
+      ? mrzCheck.givenNames
+      : visualGiven || mrzCheck?.givenNames || '';
+
   const surnameLat = String(parsedJson.surnameLat || surname)
     .toUpperCase()
     .trim();
@@ -242,11 +256,19 @@ CRITICAL RULES:
   );
 
   // Extract series and number cleanly without inventing fallback numbers
-  let series = String(parsedJson.series || mrzCheck?.series || '')
+  let series = (
+    mrzChecks.numberValid && mrzCheck?.series
+      ? mrzCheck.series
+      : String(parsedJson.series || mrzCheck?.series || '')
+  )
     .toUpperCase()
     .replace(/[^A-Z]/g, '')
     .slice(0, 3);
-  let number = String(parsedJson.number || mrzCheck?.number || '')
+  let number = (
+    mrzChecks.numberValid && mrzCheck?.number
+      ? mrzCheck.number
+      : String(parsedJson.number || mrzCheck?.number || '')
+  )
     .toUpperCase()
     .replace(/[^A-Z0-9]/g, '');
 
@@ -277,18 +299,31 @@ CRITICAL RULES:
       ? 'MRS'
       : 'MR';
 
+  const resolvedBirthDate =
+    mrzChecks.dobValid && mrzCheck?.birthDate
+      ? mrzCheck.birthDate
+      : String(parsedJson.birthDate || mrzCheck?.birthDate || '').trim();
+
+  const resolvedExpiryDate =
+    mrzChecks.expiryValid && mrzCheck?.expiryDate
+      ? mrzCheck.expiryDate
+      : ensureDotDate(String(parsedJson.expiryDate || mrzCheck?.expiryDate || '').trim());
+
   const record: PassportRecord = {
     id: `pass_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
     surname,
     givenNames: givenNames || '-',
-    surnameLat,
-    givenNamesLat: givenNamesLat || givenNames || '-',
-    birthDate: String(parsedJson.birthDate || mrzCheck?.birthDate || '').trim(),
+    surnameLat: mrzChecks.numberValid && mrzHasCleanNameDelimiter ? surname : surnameLat,
+    givenNamesLat:
+      (mrzChecks.numberValid && mrzHasCleanNameDelimiter ? givenNames : givenNamesLat) ||
+      givenNames ||
+      '-',
+    birthDate: resolvedBirthDate,
     title,
     series,
     number,
     issueDate: ensureDotDate(String(parsedJson.issueDate || mrzCheck?.issueDate || '').trim()),
-    expiryDate: ensureDotDate(String(parsedJson.expiryDate || mrzCheck?.expiryDate || '').trim()),
+    expiryDate: resolvedExpiryDate,
     nationality: String(parsedJson.nationality || mrzCheck?.nationality || "O'zbekiston").trim(),
     gender,
     country: String(parsedJson.country || mrzCheck?.country || "O'zbekiston").trim(),
@@ -518,14 +553,15 @@ app.get('/api/project-zip', async (req: Request, res: Response) => {
 app.post('/api/telegram/webhook', async (req: Request, res: Response) => {
   try {
     const update = req.body;
-    const message = update?.message || update?.edited_message;
+    const callbackQuery = update?.callback_query;
+    const message = update?.message || update?.edited_message || callbackQuery?.message;
     if (!message) {
       res.json({ ok: true });
       return;
     }
 
     const chatId = message.chat.id;
-    const text = message.text ? message.text.trim() : '';
+    const text = callbackQuery ? String(callbackQuery.data || '') : (message.text ? message.text.trim() : '');
     const session = getSession(chatId);
 
     // Helper to send message via Telegram Bot API if token is configured
@@ -546,6 +582,33 @@ app.post('/api/telegram/webhook', async (req: Request, res: Response) => {
         console.error('Failed to send Telegram message:', err);
       }
     };
+
+    const sendTelegramDocument = async (buffer: Buffer, filename: string, caption: string) => {
+      if (!botToken) return;
+      try {
+        const form = new FormData();
+        form.append('chat_id', String(chatId));
+        form.append('caption', caption);
+        form.append('parse_mode', 'HTML');
+        form.append('document', new Blob([new Uint8Array(buffer)], {
+          type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        }), filename);
+        await fetch(`https://api.telegram.org/bot${botToken}/sendDocument`, {
+          method: 'POST',
+          body: form,
+        });
+      } catch (err) {
+        console.error('Failed to send Telegram document:', err);
+      }
+    };
+
+    if (callbackQuery && botToken) {
+      fetch(`https://api.telegram.org/bot${botToken}/answerCallbackQuery`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ callback_query_id: callbackQuery.id }),
+      }).catch(() => {});
+    }
 
     // Command handling
     if (text.startsWith('/start')) {
@@ -579,10 +642,16 @@ app.post('/api/telegram/webhook', async (req: Request, res: Response) => {
       return;
     }
 
-    if (text.startsWith('/flykhiva')) {
+    if (text.startsWith('/flykhiva') || text === 'mode_flykhiva' || text === 'get_flykhiva') {
       session.template = 'flykhiva';
       if (session.passports.length > 0) {
-        await sendTelegramReply(`✈️ <b>FlyKhiva Zayavka tayyorlanmoqda...</b>\nJami: ${session.passports.length} ta yo'lovchi`);
+        const wb = await generateFlyKhivaWorkbook(session.passports);
+        const buf = await workbookToBuffer(wb);
+        await sendTelegramDocument(
+          buf,
+          `Spisok_Na_Aviabileti_${Date.now()}.xlsx`,
+          `✈️ <b>FlyKhiva Zayavka tayyor!</b>\nJami: ${session.passports.length} ta yo'lovchi`
+        );
       } else {
         await sendTelegramReply(`✈️ <b>FlyKhiva rejimi tanlandi!</b>\nIltimos, pasport rasmlarini yuboring.`);
       }
@@ -590,10 +659,16 @@ app.post('/api/telegram/webhook', async (req: Request, res: Response) => {
       return;
     }
 
-    if (text.startsWith('/prestige')) {
+    if (text.startsWith('/prestige') || text === 'mode_prestige' || text === 'get_prestige') {
       session.template = 'prestige';
       if (session.passports.length > 0) {
-        await sendTelegramReply(`🏛 <b>Prestige Zayavka tayyorlanmoqda...</b>\nJami: ${session.passports.length} ta pasport`);
+        const wb = await generatePrestigeWorkbook(session.passports);
+        const buf = await workbookToBuffer(wb);
+        await sendTelegramDocument(
+          buf,
+          `Prestige_TAS_SHARM_${Date.now()}.xlsx`,
+          `🏛 <b>Prestige Zayavka tayyor!</b>\nJami: ${session.passports.length} ta pasport`
+        );
       } else {
         await sendTelegramReply(`🏛 <b>Prestige rejimi tanlandi!</b>\nIltimos, pasport rasmlarini yuboring.`);
       }
@@ -746,28 +821,59 @@ app.get('/api/admin/status', (req: Request, res: Response) => {
   });
 });
 
-app.post('/api/admin/settings', (req: Request, res: Response) => {
-  const { pin, newBotToken, newDeployHookUrl } = req.body;
+app.post('/api/admin/settings', async (req: Request, res: Response) => {
+  const { pin, newBotToken, newDeployHookUrl, registerWebhook } = req.body;
   if (pin !== '1111' && pin !== '7777') {
     res.status(403).json({ error: "PIN kod noto'g'ri (1111 yoki 7777 talab qilinadi)" });
     return;
   }
-  if (newBotToken !== undefined) botToken = newBotToken;
-  if (newDeployHookUrl !== undefined) deployHookUrl = newDeployHookUrl;
+  if (typeof newBotToken === 'string' && newBotToken.trim()) {
+    botToken = newBotToken.trim();
+  }
+  if (typeof newDeployHookUrl === 'string' && newDeployHookUrl.trim()) {
+    deployHookUrl = newDeployHookUrl.trim();
+  }
+
+  let webhookMessage = 'Sozlamalar saqlandi';
+  let webhookOk = true;
+
+  if (registerWebhook && botToken) {
+    const host = req.get('host') || '';
+    const proto = req.get('x-forwarded-proto') || req.protocol || 'https';
+    const webhookUrl = `${proto}://${host}/api/telegram/webhook`;
+    try {
+      const tgRes = await fetch(
+        `https://api.telegram.org/bot${botToken}/setWebhook?url=${encodeURIComponent(webhookUrl)}`
+      );
+      const tgData = await tgRes.json();
+      if (tgData.ok) {
+        webhookMessage = `Telegram Webhook ulandi: ${webhookUrl}`;
+      } else {
+        webhookOk = false;
+        webhookMessage = `Telegram xatosi: ${tgData.description || "Token noto'g'ri"}`;
+      }
+    } catch (err: any) {
+      webhookOk = false;
+      webhookMessage = `Telegram ulanish xatosi: ${err.message}`;
+    }
+  }
 
   res.json({
-    success: true,
-    message: 'Sozlamalar yangilandi',
+    success: webhookOk,
+    message: webhookMessage,
     telegramConfigured: Boolean(botToken),
     renderConfigured: Boolean(deployHookUrl),
   });
 });
 
 app.post('/api/admin/deploy', async (req: Request, res: Response) => {
-  const { pin } = req.body;
+  const { pin, deployHookUrl: suppliedHookUrl } = req.body;
   if (pin !== '1111' && pin !== '7777') {
     res.status(403).json({ error: "PIN kod noto'g'ri (1111 yoki 7777 talab qilinadi)" });
     return;
+  }
+  if (typeof suppliedHookUrl === 'string' && suppliedHookUrl.trim()) {
+    deployHookUrl = suppliedHookUrl.trim();
   }
   if (!deployHookUrl) {
     res.status(400).json({ error: 'Render Deploy Hook URL sozlanmagan' });
@@ -776,6 +882,11 @@ app.post('/api/admin/deploy', async (req: Request, res: Response) => {
 
   try {
     const hookRes = await fetch(deployHookUrl, { method: 'POST' });
+    if (!hookRes.ok) {
+      const errText = await hookRes.text();
+      res.status(hookRes.status).json({ error: `Render javobi (${hookRes.status}): ${errText || "Hook URL noto'g'ri"}` });
+      return;
+    }
     res.json({
       success: true,
       status: hookRes.status,

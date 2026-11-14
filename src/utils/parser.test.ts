@@ -7,6 +7,8 @@ import {
   formatUzbekDate,
   formatDotDate,
   ensureDotDate,
+  computeMrzCheckDigit,
+  verifyMrzLine2,
 } from './mrzParser';
 import { generatePrestigeWorkbook, generateFlyKhivaWorkbook } from './excelGenerator';
 import { PassportRecord } from '../types/passport';
@@ -31,6 +33,28 @@ test('stripPatronymic removes father name / patronymics and preserves given name
   assert.equal(stripPatronymic("SARDOR ALISHER O'G'LI"), 'SARDOR');
   assert.equal(stripPatronymic('MALIKA AKMAL QIZI'), 'MALIKA');
   assert.equal(stripPatronymic('ANVAR'), 'ANVAR');
+});
+
+test('computeMrzCheckDigit & verifyMrzLine2 validate real ICAO 9303 passport checksums', () => {
+  // Real Uzbek passport MRZ line 2 for ABDULKHAMIDOV RAVSHAN
+  const realLine2 = 'FA38322803UZB8605076M31091223070586017002786';
+  assert.equal(computeMrzCheckDigit('FA3832280'), '3');
+  assert.equal(computeMrzCheckDigit('860507'), '6');
+  assert.equal(computeMrzCheckDigit('310912'), '2');
+
+  const valid = verifyMrzLine2(realLine2);
+  assert.deepEqual(valid, {
+    numberValid: true,
+    dobValid: true,
+    expiryValid: true,
+  });
+
+  // Corrupted passport number character (O instead of 0, check digit still 3)
+  const corruptedLine2 = 'FA383228O3UZB8605076M31091223070586017002786';
+  const corrupted = verifyMrzLine2(corruptedLine2);
+  assert.equal(corrupted.numberValid, false);
+  assert.equal(corrupted.dobValid, true);
+  assert.equal(corrupted.expiryValid, true);
 });
 
 test('parseMrzLines extracts standard ICAO 9303 TD3 Uzbek passport', () => {
