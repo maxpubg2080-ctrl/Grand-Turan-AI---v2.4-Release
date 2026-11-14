@@ -66,6 +66,28 @@ export function ensureDotDate(dateStr: string): string {
 }
 
 /**
+ * Removes Uzbek/Russian patronymics from given names (e.g. "SARDOR ALISHER O'G'LI" -> "SARDOR")
+ */
+export function stripPatronymic(given: string): string {
+  if (!given) return '';
+  const cleaned = given.trim().toUpperCase().replace(/\s+/g, ' ');
+  const tokens = cleaned.split(' ').filter(Boolean);
+  if (tokens.length <= 1) return cleaned;
+
+  // If the last token is a patronymic marker like OGLI, O'G'LI, QIZI, KIZI, UGLI or Russian suffix -VICH/-OVNA
+  const patronymicMarkers = new Set(["O'G'LI", 'OGLI', "O`G`LI", 'OʻGʻLI', 'UGLI', 'QIZI', 'KIZI']);
+  const last = tokens[tokens.length - 1];
+  if (patronymicMarkers.has(last)) {
+    // Usually "<GIVEN> <FATHER> O'G'LI" -> take only first token
+    return tokens[0];
+  }
+  if (/(?:OVICH|EVICH|VICH|OVNA|EVNA|QIZI|OGLI)$/i.test(last)) {
+    return tokens[0];
+  }
+  return tokens[0];
+}
+
+/**
  * Parses raw MRZ (2 lines of 44 chars) or text containing MRZ lines into PassportRecord
  */
 export function parseMrzLines(rawText: string): PassportRecord | null {
@@ -82,10 +104,10 @@ export function parseMrzLines(rawText: string): PassportRecord | null {
 
   for (let i = 0; i < lines.length; i++) {
     const cur = lines[i];
-    if (cur.startsWith('P<') || cur.startsWith('P') || cur.includes('UZB')) {
-      if (!line1 && cur.length >= 40) {
+    if (cur.startsWith('P<') || cur.startsWith('P0') || cur.startsWith('PK')) {
+      if (!line1 && cur.length >= 36) {
         line1 = cur;
-        if (i + 1 < lines.length && lines[i + 1].length >= 40) {
+        if (i + 1 < lines.length && lines[i + 1].length >= 36) {
           line2 = lines[i + 1];
           break;
         }
@@ -93,7 +115,7 @@ export function parseMrzLines(rawText: string): PassportRecord | null {
     }
   }
 
-  // If standard 44-char line not found, attempt regex extraction on raw text
+  // If standard 2-line MRZ not found, attempt strict regex extraction on raw text (never fabricating data)
   if (!line1 || !line2) {
     return parsePassportTextRegex(rawText);
   }
@@ -108,26 +130,32 @@ export function parseMrzLines(rawText: string): PassportRecord | null {
   const namePart = line1.substring(5);
   const nameTokens = namePart.split('<<').filter(Boolean);
   const surname = (nameTokens[0] || '').replace(/</g, ' ').trim();
-  const givenNames = (nameTokens[1] || '').replace(/</g, ' ').trim();
+  const rawGiven = (nameTokens[1] || '').replace(/</g, ' ').trim();
+  const givenNames = stripPatronymic(rawGiven);
 
   // LINE 2: FA12345678UZB9005142M3301095<<<<<<<<<<<<<<02
   // Passport number: chars 0..9
   const rawPassportNum = line2.substring(0, 9).replace(/</g, '').trim();
   const seriesMatch = rawPassportNum.match(/^([A-Z]{1,3})/);
-  const numMatch = rawPassportNum.match(/([0-9]{5,8})$/);
+  const numMatch = rawPassportNum.match(/([0-9]{5,9})$/);
 
   const series = seriesMatch ? seriesMatch[1] : rawPassportNum.substring(0, 2);
   const number = numMatch ? numMatch[1] : rawPassportNum.substring(2);
+
+  if (!surname || !number) {
+    return null;
+  }
 
   // Nationality: chars 10..13
   const natCode = line2.substring(10, 13).replace(/</g, '').trim() || countryCode;
 
   // Date of birth: chars 13..19 (YYMMDD)
   const dobYY = line2.substring(13, 15);
-  const dobMM = parseInt(line2.substring(15, 17), 10) || 1;
-  const dobDD = parseInt(line2.substring(17, 19), 10) || 1;
-  const birthYear = parseMrzYear(dobYY, false);
-  const birthDate = formatUzbekDate(birthYear, dobMM, dobDD);
+  const dobMM = parseInt(line2.substring(15, 17), 10);
+  const dobDD = parseInt(line2.substring(17, 19), 10);
+  const hasValidDob = !isNaN(parseInt(dobYY, 10)) && dobMM >= 1 && dobMM <= 12 && dobDD >= 1 && dobDD <= 31;
+  const birthYear = hasValidDob ? parseMrzYear(dobYY, false) : 0;
+  const birthDate = hasValidDob ? formatUzbekDate(birthYear, dobMM, dobDD) : '';
 
   // Sex: char 20
   const sexChar = line2.charAt(20);
@@ -136,17 +164,33 @@ export function parseMrzLines(rawText: string): PassportRecord | null {
 
   // Expiration date: chars 21..27 (YYMMDD)
   const expYY = line2.substring(21, 23);
-  const expMM = parseInt(line2.substring(23, 25), 10) || 1;
-  const expDD = parseInt(line2.substring(25, 27), 10) || 1;
-  const expYear = parseMrzYear(expYY, true);
-  const expiryDate = formatDotDate(expYear, expMM, expDD);
+  const expMM = parseInt(line2.substring(23, 25), 10);
+  const expDD = parseInt(line2.substring(25, 27), 10);
+  const hasValidExp = !isNaN(parseInt(expYY, 10)) && expMM >= 1 && expMM <= 12 && expDD >= 1 && expDD <= 31;
+  const expYear = hasValidExp ? parseMrzYear(expYY, true) : 0;
+  const expiryDate = hasValidExp ? formatDotDate(expYear, expMM, expDD) : '';
 
-  // Issue date calculation (typically 10 years before expiry for Uzbek passports)
-  const issueYear = expYear - 10;
-  const issueDate = formatDotDate(issueYear, expMM, expDD > 1 ? expDD + 1 : 1);
+  // Issue date estimation only if valid expiry is present
+  let issueDate = '';
+  if (hasValidExp) {
+    const issueYear = expYear - 10;
+    issueDate = formatDotDate(issueYear, expMM, expDD > 1 ? expDD : 1);
+  }
 
-  const nationality = natCode === 'UZB' ? "O'zbekiston" : natCode;
-  const country = "O'zbekiston";
+  const countryNameMap: Record<string, string> = {
+    UZB: "O'zbekiston",
+    KAZ: "Qozog'iston",
+    KGZ: "Qirg'iziston",
+    TJK: 'Tojikiston',
+    TKM: 'Turkmaniston',
+    RUS: 'Rossiya',
+    TUR: 'Turkiya',
+    USA: 'AQSH',
+    GBR: 'Buyuk Britaniya',
+    ARE: 'BAA',
+  };
+  const nationality = countryNameMap[natCode] || natCode;
+  const country = countryNameMap[countryCode] || countryCode;
 
   return {
     id: `pass_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
@@ -171,15 +215,19 @@ export function parseMrzLines(rawText: string): PassportRecord | null {
 }
 
 /**
- * Regex fallback for passport text or forms if MRZ is absent or degraded
+ * Strict regex extraction for passport text if MRZ is absent.
+ * Returns null if genuine passport fields cannot be extracted (NEVER invents fake data).
  */
 export function parsePassportTextRegex(text: string): PassportRecord | null {
-  if (!text || text.length < 15) return null;
+  if (!text || text.trim().length < 15) return null;
 
   // Try finding series + number: e.g. "FA 1234567" or "FA1234567" or "AA1234567"
   const passNumMatch = text.match(/\b([A-Z]{2})\s*([0-9]{7})\b/i);
-  const series = passNumMatch ? passNumMatch[1].toUpperCase() : 'FA';
-  const number = passNumMatch ? passNumMatch[2] : '1234567';
+  if (!passNumMatch) {
+    return null;
+  }
+  const series = passNumMatch[1].toUpperCase();
+  const number = passNumMatch[2];
 
   // Try finding names
   let surname = '';
@@ -188,35 +236,52 @@ export function parsePassportTextRegex(text: string): PassportRecord | null {
   const givenMatch = text.match(/(?:ism|name|given\s*names?|имя)[:\s]+([A-ZА-ЯЁ'-]+)/i);
 
   if (surnameMatch) surname = surnameMatch[1].toUpperCase();
-  if (givenMatch) givenNames = givenMatch[1].toUpperCase();
+  if (givenMatch) givenNames = stripPatronymic(givenMatch[1].toUpperCase());
 
   // If not found with labels, search for two consecutive uppercase words
   if (!surname || !givenNames) {
     const uppercaseWords = text.match(/\b[A-Z]{3,20}\b/g) || [];
     const filtered = uppercaseWords.filter(
-      (w) => !['PASSPORT', 'REPUBLIC', 'UZBEKISTAN', 'OʻZBEKISTON', 'OZBEKISTON', 'DATE', 'BIRTH', 'SEX', 'M', 'F'].includes(w)
+      (w) =>
+        ![
+          'PASSPORT',
+          'REPUBLIC',
+          'UZBEKISTAN',
+          'OZBEKISTON',
+          'DATE',
+          'BIRTH',
+          'SEX',
+          'ISSUE',
+          'EXPIRY',
+          'AUTHORITY',
+          'CITIZENSHIP',
+        ].includes(w)
     );
     if (filtered.length >= 2) {
       surname = filtered[0];
-      givenNames = filtered[1];
-    } else {
-      surname = 'KARIMOV';
-      givenNames = 'SARDOR';
+      givenNames = stripPatronymic(filtered[1]);
     }
   }
 
+  // Never fabricate fake names if real names were not found
+  if (!surname || !givenNames) {
+    return null;
+  }
+
   // Birth date regex
-  const dateMatch = text.match(/\b([0-3]?[0-9])[./-]([0-1]?[0-9])[./-](19[5-9][0-9]|20[0-2][0-9])\b/);
-  let birthDate = '1990-yil 14-may';
+  const dateMatch = text.match(/\b([0-3]?[0-9])[./-]([0-1]?[0-9])[./-](19[4-9][0-9]|20[0-2][0-9])\b/);
+  let birthDate = '';
   if (dateMatch) {
     const d = parseInt(dateMatch[1], 10);
     const m = parseInt(dateMatch[2], 10);
     const y = parseInt(dateMatch[3], 10);
-    birthDate = formatUzbekDate(y, m, d);
+    if (m >= 1 && m <= 12 && d >= 1 && d <= 31) {
+      birthDate = formatUzbekDate(y, m, d);
+    }
   }
 
   // Gender detection
-  const isFemale = /\b(female|ayol|жен|женский|\bF\b)/i.test(text);
+  const isFemale = /\b(female|ayol|жен|женский)\b/i.test(text);
   const gender: 'M' | 'F' = isFemale ? 'F' : 'M';
   const title: 'MR' | 'MRS' = gender === 'M' ? 'MR' : 'MRS';
 
@@ -230,8 +295,8 @@ export function parsePassportTextRegex(text: string): PassportRecord | null {
     title,
     series,
     number,
-    issueDate: '10.01.2023',
-    expiryDate: '09.01.2033',
+    issueDate: '',
+    expiryDate: '',
     nationality: "O'zbekiston",
     gender,
     country: "O'zbekiston",

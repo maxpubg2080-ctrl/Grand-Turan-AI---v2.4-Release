@@ -22,8 +22,8 @@ git commit -m "Grand Turan AI - v2.4 Pasport & Excel Studio"
 # 4. Asosiy tarmoqni 'main' deb belgilash
 git branch -M main
 
-# 5. GitHub-da yangi (bo'sh) repository yarating (masalan: grand-turan-ai) va uning linkini ulang:
-git remote add origin https://github.com/SIZNING_GITHUB_USERNAME/grand-turan-ai.git
+# 5. GitHub repository linkini ulang (yoki mavjud repoga push qiling):
+git remote add origin https://github.com/maxpubg2080-ctrl/Grand-Turan-AI---v2.4-Release.git
 
 # 6. Kodlarni GitHub-ga yuklash:
 git push -u origin main

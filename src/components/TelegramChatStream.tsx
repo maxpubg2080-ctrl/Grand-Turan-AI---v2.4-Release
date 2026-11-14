@@ -37,6 +37,7 @@ export const TelegramChatStream: React.FC<TelegramChatStreamProps> = ({
   const t = getTranslation(lang);
   const [inputVal, setInputVal] = useState('');
   const chatBottomRef = useRef<HTMLDivElement | null>(null);
+  const announcedIdsRef = useRef<Set<string>>(new Set(passports.map((p) => p.id)));
 
   const [messages, setMessages] = useState<TelegramChatBubble[]>([
     {
@@ -52,8 +53,7 @@ export const TelegramChatStream: React.FC<TelegramChatStreamProps> = ({
         `• <b>/clear</b> — navbatni tozalash\n\n` +
         `⚙️ Server & Updater buyruqlari:\n` +
         `• <b>/status</b> — Render server, AI va Baza holati\n` +
-        `• <b>/redeploy</b> — Render serverni qayta yangilash\n\n` +
-        `<i>Ixtiyoriy: API kalitingiz bormi? Kalitni kiriting yoki /skip bosib apisiz davom eting!</i>`,
+        `• <b>/redeploy</b> — Render serverni qayta yangilash`,
       time: '12:00',
     },
   ]);
@@ -66,27 +66,37 @@ export const TelegramChatStream: React.FC<TelegramChatStreamProps> = ({
     scrollToBottom();
   }, [messages]);
 
-  // When passports change, announce to chat stream
+  // When passports change, announce all newly added passports to chat stream
   useEffect(() => {
-    if (passports.length > 0) {
-      const latest = passports[passports.length - 1];
-      const newBotMsg: TelegramChatBubble = {
-        id: `bot_pass_${Date.now()}`,
+    if (passports.length === 0) {
+      announcedIdsRef.current.clear();
+      return;
+    }
+
+    const newlyAdded = passports.filter((p) => !announcedIdsRef.current.has(p.id));
+    if (newlyAdded.length === 0) return;
+
+    const newBubbles: TelegramChatBubble[] = newlyAdded.map((p, idx) => {
+      announcedIdsRef.current.add(p.id);
+      const indexInList = passports.findIndex((item) => item.id === p.id) + 1;
+      return {
+        id: `bot_pass_${p.id}_${idx}`,
         sender: 'bot',
         text:
-          `✅ <b>Pasport qabul qilindi (#${passports.length}):</b>\n` +
-          `👤 <b>F.I.O:</b> ${latest.surname} ${latest.givenNames}\n` +
-          `📄 <b>Pasport №:</b> ${latest.series}${latest.number}\n` +
-          `📅 <b>Tug'ilgan:</b> ${latest.birthDate}\n` +
-          `⏳ <b>Amal qilish:</b> ${latest.expiryDate}\n` +
-          `⚡️ <b>Dvigatel:</b> ${latest.engineUsed || 'Gemini 3.8 Flash'}\n\n` +
+          `✅ <b>Pasport qabul qilindi (#${indexInList}):</b>\n` +
+          `👤 <b>F.I.O:</b> ${p.surname} ${p.givenNames}\n` +
+          `📄 <b>Pasport №:</b> ${p.series}${p.number}\n` +
+          `📅 <b>Tug'ilgan:</b> ${p.birthDate || '-'}\n` +
+          `⏳ <b>Amal qilish:</b> ${p.expiryDate || '-'}\n` +
+          `⚡️ <b>Dvigatel:</b> ${p.engineUsed || 'gemini-4-hydrogen'}\n\n` +
           `<i>Faylni olish uchun quyidagi tugmalarni bosing:</i>`,
         time: new Date().toLocaleTimeString('uz-UZ', { hour: '2-digit', minute: '2-digit' }),
-        passportPreview: latest,
+        passportPreview: p,
       };
-      setMessages((prev) => [...prev, newBotMsg]);
-    }
-  }, [passports.length]);
+    });
+
+    setMessages((prev) => [...prev, ...newBubbles]);
+  }, [passports]);
 
   const handleCommand = (cmd: string) => {
     const time = new Date().toLocaleTimeString('uz-UZ', { hour: '2-digit', minute: '2-digit' });
@@ -186,7 +196,7 @@ export const TelegramChatStream: React.FC<TelegramChatStreamProps> = ({
         text:
           `⚙️ <b>Grand Turan AI Server Holati:</b>\n\n` +
           `🟢 <b>Server:</b> Onlayn (Vite + Express)\n` +
-          `🧠 <b>AI Model:</b> Gemini 3.8 Flash + High-Thinking Argon\n` +
+          `🧠 <b>AI Model:</b> gemini-4-hydrogen + Deterministic MRZ\n` +
           `📋 <b>Hozirgi navbat:</b> ${passports.length} ta pasport\n` +
           `👨💻 <b>Dasturchi:</b> Muhammad Amin\n` +
           `🤖 <b>Telegram:</b> @grandturanai_bot webhook tayyor`,

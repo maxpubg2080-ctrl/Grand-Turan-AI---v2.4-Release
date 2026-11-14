@@ -5,7 +5,6 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import fs from 'fs';
 import { promises as fsPromises } from 'fs';
-import crypto from 'crypto';
 
 // In AI Studio preview / Cloud Run environment, HMR WebSocket is disabled
 process.env.DISABLE_HMR = 'true';
@@ -13,7 +12,11 @@ process.env.DISABLE_HMR = 'true';
 import { createServer as createViteServer } from 'vite';
 import { GoogleGenAI, Type, ThinkingLevel } from '@google/genai';
 import JSZip from 'jszip';
-import { parseMrzLines, parsePassportTextRegex, formatUzbekDate, formatDotDate, ensureDotDate } from './src/utils/mrzParser.ts';
+import {
+  parseMrzLines,
+  stripPatronymic,
+  ensureDotDate,
+} from './src/utils/mrzParser.ts';
 import { generatePrestigeWorkbook, generateFlyKhivaWorkbook, workbookToBuffer } from './src/utils/excelGenerator.ts';
 import { PassportRecord, FlightDetails } from './src/types/passport.ts';
 
@@ -37,7 +40,22 @@ let prestigeExports = 0;
 let flykhivaExports = 0;
 let botToken = process.env.TELEGRAM_BOT_TOKEN || '';
 let deployHookUrl = process.env.RENDER_DEPLOY_HOOK_URL || '';
-let customGeminiApiKey = process.env.GEMINI_API_KEY && process.env.GEMINI_API_KEY !== 'MY_GEMINI_API_KEY' ? process.env.GEMINI_API_KEY : '';
+
+function getEffectiveGeminiKey(): string {
+  const envKey = (process.env.GEMINI_API_KEY || '').trim();
+  if (!envKey || envKey === 'MY_GEMINI_API_KEY' || envKey.length < 10) {
+    return '';
+  }
+  return envKey;
+}
+
+class AppApiError extends Error {
+  statusCode: number;
+  constructor(message: string, statusCode: number = 500) {
+    super(message);
+    this.statusCode = statusCode;
+  }
+}
 
 // Telegram session state for web simulator and webhook users
 interface TelegramUserSession {
@@ -59,77 +77,111 @@ function getSession(userId: string | number): TelegramUserSession {
 }
 
 // ---------------------------------------------------------------------------
-// REAL PASSPORT PARSER (Gemini AI Vision + Real Tesseract OCR Fallback)
+// REAL PASSPORT PARSER (Gemini AI Vision — NEVER fabricates fake data)
 // ---------------------------------------------------------------------------
+async function generateWithRetry<T>(fn: () => Promise<T>, maxRetries = 2): Promise<T> {
+  let lastError: any;
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    try {
+      return await fn();
+    } catch (err: any) {
+      lastError = err;
+      const msg = String(err?.message || '');
+      const status = err?.status || err?.code;
+      const isTransient =
+        status === 429 ||
+        status === 500 ||
+        status === 503 ||
+        msg.includes('429') ||
+        msg.includes('503') ||
+        msg.includes('ECONNRESET') ||
+        msg.includes('ETIMEDOUT') ||
+        msg.includes('RESOURCE_EXHAUSTED');
+
+      if (!isTransient || attempt === maxRetries) {
+        throw err;
+      }
+      await new Promise((r) => setTimeout(r, 1000 * Math.pow(2, attempt)));
+    }
+  }
+  throw lastError;
+}
+
+function cleanJsonResponse(text: string): string {
+  const trimmed = (text || '').trim();
+  const fenced = trimmed.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/i);
+  return fenced ? fenced[1].trim() : trimmed;
+}
+
 async function parsePassportImage(
   cleanBase64: string,
   mimeType: string,
-  useThinking: boolean = false,
-  clientApiKey?: string
+  useThinking: boolean = false
 ): Promise<{ record: PassportRecord; engine: string }> {
-  const effectiveKey = (clientApiKey || customGeminiApiKey || process.env.GEMINI_API_KEY || '').trim();
-  const hasKey = effectiveKey.length > 10 && effectiveKey !== 'MY_GEMINI_API_KEY';
+  const effectiveKey = getEffectiveGeminiKey();
+  if (!effectiveKey) {
+    throw new AppApiError(
+      "GEMINI_API_KEY serverda sozlanmagan. Iltimos, AI Studio Secrets yoki Render Environment Variables bo'limida GEMINI_API_KEY ni kiriting (yoki Offline MRZ matn kiritishdan foydalaning).",
+      400
+    );
+  }
 
-  // Strategy 1: Real Gemini AI Vision if API key is provided
-  if (hasKey) {
-    try {
-      const client = new GoogleGenAI({
-        apiKey: effectiveKey,
-        httpOptions: {
-          headers: {
-            'User-Agent': 'aistudio-build',
-          },
-        },
-      });
+  const client = new GoogleGenAI({
+    apiKey: effectiveKey,
+    httpOptions: {
+      headers: {
+        'User-Agent': 'aistudio-build',
+      },
+    },
+  });
 
-      const modelName = useThinking ? 'gemini-2.5-pro' : 'gemini-2.5-flash';
-      const systemPrompt = `You are a professional passport data extraction engine. Analyze this passport photo with 100% precision.
-Extract:
-- surname: Surname in uppercase (e.g., ALIEV, KARIMOV, TOSHMATOVA)
-- givenNames: Given name in uppercase (e.g., AZIZ, SARDOR, DILNOZA)
-- surnameLat: Latin surname
-- givenNamesLat: Latin given names
-- birthDate: Birth date in Uzbek format "YYYY-yil D-oy" (e.g., "1992-yil 15-may")
-- title: "MR" for male, "MRS" for female, "CHD" for child
-- series: 2-letter series (e.g., FA, AA, AB)
-- number: 7-digit passport number
-- issueDate: Issue date in "DD.MM.YYYY" (or 10 years before expiry)
-- expiryDate: Expiry date in "DD.MM.YYYY"
-- nationality: Nationality ("O'zbekiston" or country name)
-- gender: "M" or "F"
-- country: Country name ("O'zbekiston")
-- rawMrz: The 2-line MRZ string if present at bottom`;
+  const modelName = 'gemini-4-hydrogen';
+  const systemPrompt = `You are a strict, 100% truthful passport data extraction OCR engine.
+CRITICAL RULES:
+1. Read ONLY the actual text and 2-line MRZ printed on the provided passport image. NEVER guess, invent, or substitute placeholder names or numbers.
+2. If the image is NOT a passport or is completely illegible so surname or passport number cannot be read, set errorReason to a brief explanation and leave surname/number empty.
+3. NEVER include patronymic / middle name / father's name (otasining ismi, e.g., O'G'LI, QIZI, OGLI, KIZI, -VICH, -OVNA) in givenNames or givenNamesLat. Output strictly the Surname and First Given Name only.
+4. Read the 2-line MRZ at the bottom verbatim into rawMrz if visible, and use it to verify spelling, passport series/number, birthDate, gender, and expiryDate.
+5. Format dates precisely:
+   - birthDate: Uzbek format "YYYY-yil D-oy" (lowercase months: yanvar, fevral, mart, aprel, may, iyun, iyul, avgust, sentabr, oktabr, noyabr, dekabr, e.g. "1992-yil 5-may").
+   - issueDate: "DD.MM.YYYY" (leave "" if not printed on document).
+   - expiryDate: "DD.MM.YYYY".
+6. Extract series (2-3 uppercase letters, e.g. FA, AA, AB) and number (digits, e.g. 5142207) separately.
+7. title must be "MR" for male (M), "MRS" for female (F), or "CHD" if explicitly minor/child.`;
 
-      const config: Record<string, any> = {
-        systemInstruction: systemPrompt,
-        responseMimeType: 'application/json',
-        responseSchema: {
-          type: Type.OBJECT,
-          properties: {
-            surname: { type: Type.STRING },
-            givenNames: { type: Type.STRING },
-            surnameLat: { type: Type.STRING },
-            givenNamesLat: { type: Type.STRING },
-            birthDate: { type: Type.STRING },
-            title: { type: Type.STRING },
-            series: { type: Type.STRING },
-            number: { type: Type.STRING },
-            issueDate: { type: Type.STRING },
-            expiryDate: { type: Type.STRING },
-            nationality: { type: Type.STRING },
-            gender: { type: Type.STRING },
-            country: { type: Type.STRING },
-            rawMrz: { type: Type.STRING },
-          },
-          required: ['surname', 'givenNames', 'birthDate', 'series', 'number', 'expiryDate', 'gender'],
-        },
-      };
+  const config: Record<string, any> = {
+    systemInstruction: systemPrompt,
+    responseMimeType: 'application/json',
+    responseSchema: {
+      type: Type.OBJECT,
+      properties: {
+        errorReason: { type: Type.STRING },
+        surname: { type: Type.STRING },
+        givenNames: { type: Type.STRING },
+        surnameLat: { type: Type.STRING },
+        givenNamesLat: { type: Type.STRING },
+        birthDate: { type: Type.STRING },
+        title: { type: Type.STRING },
+        series: { type: Type.STRING },
+        number: { type: Type.STRING },
+        issueDate: { type: Type.STRING },
+        expiryDate: { type: Type.STRING },
+        nationality: { type: Type.STRING },
+        gender: { type: Type.STRING },
+        country: { type: Type.STRING },
+        rawMrz: { type: Type.STRING },
+      },
+      required: ['surname', 'givenNames', 'series', 'number'],
+    },
+    thinkingConfig: {
+      thinkingLevel: useThinking ? ThinkingLevel.HIGH : ThinkingLevel.LOW,
+    },
+  };
 
-      if (useThinking) {
-        config.thinkingConfig = { thinkingLevel: ThinkingLevel.HIGH };
-      }
-
-      const response = await client.models.generateContent({
+  let responseText = '';
+  try {
+    const response = await generateWithRetry(() =>
+      client.models.generateContent({
         model: modelName,
         contents: {
           parts: [
@@ -140,136 +192,180 @@ Extract:
               },
             },
             {
-              text: 'Extract all fields from this passport photo with high precision.',
+              text: 'Transcribe the exact passport details and MRZ from this image into JSON. Do not include patronymic. Do not invent any data.',
             },
           ],
         },
         config,
-      });
-
-      const parsedJson = JSON.parse(response.text || '{}');
-      if (parsedJson.surname && parsedJson.number) {
-        const record: PassportRecord = {
-          id: `pass_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
-          surname: String(parsedJson.surname).toUpperCase(),
-          givenNames: String(parsedJson.givenNames).toUpperCase(),
-          surnameLat: String(parsedJson.surnameLat || parsedJson.surname).toUpperCase(),
-          givenNamesLat: String(parsedJson.givenNamesLat || parsedJson.givenNames).toUpperCase(),
-          birthDate: parsedJson.birthDate || '1990-yil 14-may',
-          title: parsedJson.title === 'MRS' ? 'MRS' : parsedJson.title === 'CHD' ? 'CHD' : 'MR',
-          series: String(parsedJson.series || 'FA').toUpperCase().replace(/[^A-Z]/g, '').slice(0, 2) || 'FA',
-          number: String(parsedJson.number).replace(/[^0-9]/g, '').slice(0, 7) || '1234567',
-          issueDate: parsedJson.issueDate || '10.01.2023',
-          expiryDate: parsedJson.expiryDate || '09.01.2033',
-          nationality: parsedJson.nationality || "O'zbekiston",
-          gender: parsedJson.gender === 'F' ? 'F' : 'M',
-          country: parsedJson.country || "O'zbekiston",
-          rawMrz: parsedJson.rawMrz || '',
-          confidence: 0.99,
-          engineUsed: modelName,
-          parsedAt: new Date().toISOString(),
-        };
-        return { record, engine: modelName };
-      }
-    } catch (aiErr: any) {
-      console.warn('Gemini extraction failed:', aiErr.message);
+      })
+    );
+    responseText = response.text || '';
+  } catch (aiErr: any) {
+    const rawMsg = String(aiErr?.message || 'Gemini API xatosi');
+    if (rawMsg.includes('PERMISSION_DENIED') || rawMsg.includes('API_KEY_INVALID') || rawMsg.includes('403') || rawMsg.includes('401')) {
+      throw new AppApiError(
+        `Gemini API kaliti noto'g'ri yoki ruxsat yo'q. Settings > Secrets yoki Render Environment Variables bo'limida GEMINI_API_KEY ni tekshiring. (${rawMsg})`,
+        403
+      );
     }
+    if (rawMsg.includes('NOT_FOUND') || rawMsg.includes('404')) {
+      throw new AppApiError(`Gemini modeli topilmadi (${modelName}): ${rawMsg}`, 404);
+    }
+    throw new AppApiError(`Gemini AI tahlil xatosi: ${rawMsg}`, 502);
   }
 
-  // Strategy 2: Distinct Multi-Passenger Fingerprint Generator
-  // In offline mode (or if Gemini key is not configured), each uploaded passport image has a distinct checksum
-  // so each of the 6 uploaded photos gets a DISTINCT, UNIQUE record and NEVER identical copies!
-  const hash = crypto.createHash('md5').update(cleanBase64.slice(0, 10000)).digest('hex');
-  const seriesArr = ['FA', 'AA', 'AB', 'AC', 'KA', 'BA'];
-  const series = seriesArr[parseInt(hash.slice(0, 2), 16) % seriesArr.length];
-  const num = String((parseInt(hash.slice(2, 8), 16) % 8999999) + 1000000);
-  const birthYear = 1972 + (parseInt(hash.slice(8, 10), 16) % 32);
-  const birthMonth = 1 + (parseInt(hash.slice(10, 12), 16) % 12);
-  const birthDay = 1 + (parseInt(hash.slice(12, 14), 16) % 28);
-  const isFemale = parseInt(hash.slice(14, 16), 16) % 2 === 0;
+  let parsedJson: Record<string, any> = {};
+  try {
+    parsedJson = JSON.parse(cleanJsonResponse(responseText) || '{}');
+  } catch {
+    throw new AppApiError("Sun'iy intellekt javobi JSON formatida qaytmadi. Rasmni qayta yuklab ko'ring.", 502);
+  }
 
-  const namesPool = isFemale
-    ? [
-        { sur: 'TOSHMATOVA', name: 'DILNOZA' },
-        { sur: 'RAXIMOVA', name: 'ZARINA' },
-        { sur: 'YUSUPOVA', name: 'MALIKA' },
-        { sur: 'XASANOVA', name: 'SHAXNOZA' },
-        { sur: 'ALIMOVA', name: 'NIGORA' },
-        { sur: 'ISMOILOVA', name: 'GULNOZA' },
-      ]
-    : [
-        { sur: 'ALIEV', name: 'AZIZ' },
-        { sur: 'KARIMOV', name: 'SARDOR' },
-        { sur: 'QODIROV', name: 'JAMSHID' },
-        { sur: 'XOLMATOV', name: 'BEKZOD' },
-        { sur: 'NURMATOV', name: 'OTABEK' },
-        { sur: 'BOBOXONOV', name: 'SHERZOD' },
-      ];
-  const picked = namesPool[parseInt(hash.slice(16, 18), 16) % namesPool.length];
+  if (parsedJson.errorReason && (!parsedJson.surname || !parsedJson.number)) {
+    throw new AppApiError(`Pasport o'qilmadi: ${parsedJson.errorReason}`, 422);
+  }
 
-  const uniqueRecord: PassportRecord = {
-    id: `pass_${Date.now()}_${hash.slice(0, 5)}`,
-    surname: picked.sur,
-    givenNames: picked.name,
-    surnameLat: picked.sur,
-    givenNamesLat: picked.name,
-    birthDate: formatUzbekDate(birthYear, birthMonth, birthDay),
-    title: isFemale ? 'MRS' : 'MR',
+  const rawMrz = String(parsedJson.rawMrz || '').trim();
+  const mrzCheck = rawMrz ? parseMrzLines(rawMrz) : null;
+
+  const surname = String(parsedJson.surname || mrzCheck?.surname || '')
+    .toUpperCase()
+    .trim();
+  const givenNames = stripPatronymic(
+    String(parsedJson.givenNames || mrzCheck?.givenNames || '')
+  );
+  const surnameLat = String(parsedJson.surnameLat || surname)
+    .toUpperCase()
+    .trim();
+  const givenNamesLat = stripPatronymic(
+    String(parsedJson.givenNamesLat || givenNames)
+  );
+
+  // Extract series and number cleanly without inventing fallback numbers
+  let series = String(parsedJson.series || mrzCheck?.series || '')
+    .toUpperCase()
+    .replace(/[^A-Z]/g, '')
+    .slice(0, 3);
+  let number = String(parsedJson.number || mrzCheck?.number || '')
+    .toUpperCase()
+    .replace(/[^A-Z0-9]/g, '');
+
+  // If Gemini put full "FA1234567" into number and left series empty, split it
+  if (!series && /^[A-Z]{1,3}[0-9]{5,9}$/.test(number)) {
+    const splitMatch = number.match(/^([A-Z]{1,3})([0-9]{5,9})$/);
+    if (splitMatch) {
+      series = splitMatch[1];
+      number = splitMatch[2];
+    }
+  } else if (series && number.startsWith(series) && number.length > series.length + 4) {
+    number = number.slice(series.length);
+  }
+
+  if (!surname || !number) {
+    throw new AppApiError(
+      "Rasmdan pasport familiyasi yoki raqami aniqlanmadi. Iltimos, aniqroq pasport suratini yuklang.",
+      422
+    );
+  }
+
+  const gender: 'M' | 'F' =
+    parsedJson.gender === 'F' || mrzCheck?.gender === 'F' ? 'F' : 'M';
+  const title: 'MR' | 'MRS' | 'CHD' =
+    parsedJson.title === 'CHD'
+      ? 'CHD'
+      : parsedJson.title === 'MRS' || gender === 'F'
+      ? 'MRS'
+      : 'MR';
+
+  const record: PassportRecord = {
+    id: `pass_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+    surname,
+    givenNames: givenNames || '-',
+    surnameLat,
+    givenNamesLat: givenNamesLat || givenNames || '-',
+    birthDate: String(parsedJson.birthDate || mrzCheck?.birthDate || '').trim(),
+    title,
     series,
-    number: num,
-    issueDate: `10.01.${birthYear + 20}`,
-    expiryDate: `09.01.${birthYear + 30}`,
-    nationality: "O'zbekiston",
-    gender: isFemale ? 'F' : 'M',
-    country: "O'zbekiston",
-    rawMrz: `P<UZB${picked.sur}<<${picked.name}<<<<<<<<<<<<<<<<<<<\n${series}${num}8UZB${String(birthYear).slice(2)}${String(birthMonth).padStart(2, '0')}${String(birthDay).padStart(2, '0')}${isFemale ? 'F' : 'M'}${String(birthYear + 30).slice(2)}01095<<<<<<<<<<<<<<02`,
-    confidence: 0.85,
-    engineUsed: 'offline-mrz',
+    number,
+    issueDate: ensureDotDate(String(parsedJson.issueDate || mrzCheck?.issueDate || '').trim()),
+    expiryDate: ensureDotDate(String(parsedJson.expiryDate || mrzCheck?.expiryDate || '').trim()),
+    nationality: String(parsedJson.nationality || mrzCheck?.nationality || "O'zbekiston").trim(),
+    gender,
+    country: String(parsedJson.country || mrzCheck?.country || "O'zbekiston").trim(),
+    rawMrz,
+    confidence: 0.99,
+    engineUsed: modelName,
     parsedAt: new Date().toISOString(),
   };
 
-  return { record: uniqueRecord, engine: 'offline-mrz' };
+  return { record, engine: modelName };
 }
 
 // ---------------------------------------------------------------------------
-// 1. PASSPORT IMAGE PARSER API (Gemini Vision + Real OCR Fallback)
+// 1. PASSPORT IMAGE PARSER API (Gemini Vision Only — No Fake Fallback)
 // ---------------------------------------------------------------------------
 app.post('/api/parse', async (req: Request, res: Response) => {
   try {
-    const { imageBase64, mimeType = 'image/jpeg', useThinking = false, apiKey } = req.body;
+    const { imageBase64, mimeType = 'image/jpeg', useThinking = false, mode = 'ai', mrzText } = req.body;
+
+    if (mode === 'offline') {
+      if (typeof mrzText === 'string' && mrzText.trim().length > 0) {
+        const record = parseMrzLines(mrzText);
+        if (!record) {
+          res.status(422).json({
+            error: "Kiritilgan MRZ matndan pasport ma'lumotlari ajratib olinmadi. 2 qatorli MRZ kodini (P<UZB...) to'liq kiriting.",
+          });
+          return;
+        }
+        scannedPassports.push(record);
+        res.json({ success: true, record, engine: 'offline-mrz' });
+        return;
+      }
+
+      res.status(400).json({
+        error:
+          "Offline MRZ rejimida rasmni o'qib bo'lmaydi. Sun'iy intellekt (Gemini AI) rejimini tanlang yoki pasport ostidagi 2 qatorli MRZ matnini kiriting.",
+      });
+      return;
+    }
 
     if (!imageBase64) {
       res.status(400).json({ error: 'Rasm yuborilmadi (Image base64 required)' });
       return;
     }
 
-    const cleanBase64 = imageBase64.replace(/^data:image\/[a-z]+;base64,/, '');
-    const { record, engine } = await parsePassportImage(cleanBase64, mimeType, useThinking, apiKey);
+    const dataUrlMatch = String(imageBase64).match(/^data:([^;]+);base64,(.+)$/s);
+    const detectedMime = dataUrlMatch ? dataUrlMatch[1].trim() : String(mimeType);
+    const normalizedMime = detectedMime === 'image/jpg' ? 'image/jpeg' : detectedMime;
+    const cleanBase64 = (dataUrlMatch ? dataUrlMatch[2] : String(imageBase64)).trim();
+
+    const { record, engine } = await parsePassportImage(cleanBase64, normalizedMime, Boolean(useThinking));
 
     scannedPassports.push(record);
     res.json({ success: true, record, engine });
   } catch (error: any) {
+    const statusCode = error instanceof AppApiError ? error.statusCode : 500;
     console.error('Error parsing passport:', error);
-    res.status(500).json({ error: error?.message || 'Pasportni tahlil qilishda xatolik yuz berdi' });
+    res.status(statusCode).json({ error: error?.message || 'Pasportni tahlil qilishda xatolik yuz berdi' });
   }
 });
 
-// Endpoint to dynamically set and get Gemini API Key
-app.post('/api/admin/api-key', (req: Request, res: Response) => {
-  const { apiKey } = req.body;
-  if (typeof apiKey === 'string') {
-    customGeminiApiKey = apiKey.trim();
-    res.json({ success: true, message: 'API kalit muvaffaqiyatli saqlandi', hasKey: customGeminiApiKey.length > 10 });
+// Deterministic MRZ 2-line text parser endpoint
+app.post('/api/parse-mrz', (req: Request, res: Response) => {
+  const { mrzText } = req.body;
+  if (!mrzText || typeof mrzText !== 'string') {
+    res.status(400).json({ error: 'MRZ matn kiritilmadi' });
     return;
   }
-  res.status(400).json({ error: 'Kalit formati noto‘g‘ri' });
-});
-
-app.get('/api/admin/api-key', (req: Request, res: Response) => {
-  const key = customGeminiApiKey || process.env.GEMINI_API_KEY || '';
-  const hasKey = Boolean(key && key !== 'MY_GEMINI_API_KEY' && key.length > 10);
-  const maskedKey = hasKey ? `${key.slice(0, 6)}...${key.slice(-4)}` : '';
-  res.json({ hasKey, maskedKey });
+  const record = parseMrzLines(mrzText);
+  if (!record) {
+    res.status(422).json({
+      error: "MRZ formati noto'g'ri yoki to'liq emas. Pasport ostidagi 2 qatorni (masalan P<UZB...) to'liq kiriting.",
+    });
+    return;
+  }
+  scannedPassports.push(record);
+  res.json({ success: true, record, engine: 'offline-mrz' });
 });
 
 // ---------------------------------------------------------------------------
@@ -462,8 +558,7 @@ app.post('/api/telegram/webhook', async (req: Request, res: Response) => {
         `• /clear — navbatni tozalash\n\n` +
         `⚙️ Server & Updater buyruqlari:\n` +
         `• /status — Render server, AI va Baza holati\n` +
-        `• /redeploy — Render serverni qayta yangilash\n\n` +
-        `<i>Ixtiyoriy: API kalitingiz bormi? Kalitni kiriting yoki /skip bosib apisiz davom eting!</i>`;
+        `• /redeploy — Render serverni qayta yangilash`;
 
       await sendTelegramReply(welcome, {
         inline_keyboard: [
@@ -471,7 +566,6 @@ app.post('/api/telegram/webhook', async (req: Request, res: Response) => {
             { text: '✈️ FlyKhiva Rejimi', callback_data: 'mode_flykhiva' },
             { text: '🏛 Prestige Rejimi', callback_data: 'mode_prestige' },
           ],
-          [{ text: '⚡️ /skip (Apisiz MRZ)', callback_data: 'mode_skip' }],
         ],
       });
       res.json({ ok: true });
@@ -480,7 +574,7 @@ app.post('/api/telegram/webhook', async (req: Request, res: Response) => {
 
     if (text.startsWith('/skip')) {
       session.useApi = false;
-      await sendTelegramReply(`✅ <b>Apisiz rejim yoqildi!</b>\nEndi pasport rasmlarini yuboring (1 tadan 100 tagacha).`);
+      await sendTelegramReply(`ℹ️ <b>MRZ matn rejimi yoqildi!</b>\nPasport ostidagi 2 qatorli MRZ matnini (P<UZB...) yuboring yoki AI uchun rasm tashlang.`);
       res.json({ ok: true });
       return;
     }
@@ -517,13 +611,14 @@ app.post('/api/telegram/webhook', async (req: Request, res: Response) => {
     if (text.startsWith('/status')) {
       const uptimeSec = Math.floor((Date.now() - startTime) / 1000);
       const memMb = Math.round(process.memoryUsage().rss / 1024 / 1024);
+      const aiReady = Boolean(getEffectiveGeminiKey());
       const msg = `⚙️ <b>Server & Updater Holati:</b>\n\n` +
         `🟢 <b>Server:</b> Faol (Uptime: ${uptimeSec} soniya)\n` +
-        `🧠 <b>AI Dvigateli:</b> Gemini 3.8 Flash + Offline MRZ\n` +
+        `🧠 <b>AI Dvigateli:</b> gemini-4-hydrogen (${aiReady ? 'Faol' : 'GEMINI_API_KEY kiritilmagan'})\n` +
         `💾 <b>Baza:</b> ${scannedPassports.length} ta pasport yozilgan\n` +
         `📊 <b>Xotira:</b> ${memMb} MB\n` +
         `👨💻 <b>Dasturchi:</b> Muhammad Amin\n` +
-        `🚀 <b>Render Deploy:</b> ${deployHookUrl ? 'Uланган' : 'Sozlanmagan'}`;
+        `🚀 <b>Render Deploy:</b> ${deployHookUrl ? 'Ulangan' : 'Sozlanmagan'}`;
       await sendTelegramReply(msg);
       res.json({ ok: true });
       return;
@@ -539,6 +634,26 @@ app.post('/api/telegram/webhook', async (req: Request, res: Response) => {
         }
       } else {
         await sendTelegramReply(`⚠️ Deploy hook sozlanmagan. Admin paneldan Render Deploy Hook URL kiriting.`);
+      }
+      res.json({ ok: true });
+      return;
+    }
+
+    // Raw MRZ text sent directly to Telegram bot
+    if (text.includes('P<')) {
+      const mrzRecord = parseMrzLines(text);
+      if (mrzRecord) {
+        session.passports.push(mrzRecord);
+        scannedPassports.push(mrzRecord);
+        const reply = `✅ <b>MRZ qabul qilindi (#${session.passports.length}):</b>\n` +
+          `👤 <b>F.I.O:</b> ${mrzRecord.surname} ${mrzRecord.givenNames}\n` +
+          `📄 <b>Pasport №:</b> ${mrzRecord.series}${mrzRecord.number}\n` +
+          `📅 <b>Tug'ilgan:</b> ${mrzRecord.birthDate}\n` +
+          `⏳ <b>Amal qilish:</b> ${mrzRecord.expiryDate}\n` +
+          `⚡️ <b>Dvigatel:</b> offline-mrz`;
+        await sendTelegramReply(reply);
+      } else {
+        await sendTelegramReply(`⚠️ MRZ matnidan ma'lumot ajratib bo'lmadi. Iltimos 2 qatorni to'liq yuboring.`);
       }
       res.json({ ok: true });
       return;
@@ -564,38 +679,39 @@ app.post('/api/telegram/webhook', async (req: Request, res: Response) => {
         }
       }
 
-      let parsedRecord: PassportRecord;
-      let engineName = 'gemini-3.8-flash';
-      if (cleanBase64) {
-        const result = await parsePassportImage(cleanBase64, 'image/jpeg');
-        parsedRecord = result.record;
-        engineName = result.engine;
-      } else {
-        const dummyBase64 = Buffer.from(`dummy_tg_${Date.now()}_${message.message_id}`).toString('base64');
-        const result = await parsePassportImage(dummyBase64, 'image/jpeg');
-        parsedRecord = result.record;
-        engineName = result.engine;
+      if (!cleanBase64) {
+        await sendTelegramReply(`❌ Telegram rasmni yuklab bo'lmadi (TELEGRAM_BOT_TOKEN ni tekshiring).`);
+        res.json({ ok: true });
+        return;
       }
 
-      session.passports.push(parsedRecord);
-      scannedPassports.push(parsedRecord);
+      try {
+        const result = await parsePassportImage(cleanBase64, 'image/jpeg');
+        const parsedRecord = result.record;
+        const engineName = result.engine;
 
-      const reply = `✅ <b>Pasport qabul qilindi (#${session.passports.length}):</b>\n` +
-        `👤 <b>F.I.O:</b> ${parsedRecord.surname} ${parsedRecord.givenNames}\n` +
-        `📄 <b>Pasport №:</b> ${parsedRecord.series}${parsedRecord.number}\n` +
-        `📅 <b>Tug'ilgan:</b> ${parsedRecord.birthDate}\n` +
-        `⏳ <b>Amal qilish:</b> ${parsedRecord.expiryDate}\n` +
-        `⚡️ <b>Dvigatel:</b> ${engineName}\n\n` +
-        `<i>Yana rasm yuboring yoki /flykhiva yoki /prestige buyrug'ini bosing.</i>`;
+        session.passports.push(parsedRecord);
+        scannedPassports.push(parsedRecord);
 
-      await sendTelegramReply(reply, {
-        inline_keyboard: [
-          [
-            { text: '📥 FlyKhiva Excel olish', callback_data: 'get_flykhiva' },
-            { text: '📥 Prestige Excel olish', callback_data: 'get_prestige' },
+        const reply = `✅ <b>Pasport qabul qilindi (#${session.passports.length}):</b>\n` +
+          `👤 <b>F.I.O:</b> ${parsedRecord.surname} ${parsedRecord.givenNames}\n` +
+          `📄 <b>Pasport №:</b> ${parsedRecord.series}${parsedRecord.number}\n` +
+          `📅 <b>Tug'ilgan:</b> ${parsedRecord.birthDate}\n` +
+          `⏳ <b>Amal qilish:</b> ${parsedRecord.expiryDate}\n` +
+          `⚡️ <b>Dvigatel:</b> ${engineName}\n\n` +
+          `<i>Yana rasm yuboring yoki /flykhiva yoki /prestige buyrug'ini bosing.</i>`;
+
+        await sendTelegramReply(reply, {
+          inline_keyboard: [
+            [
+              { text: '📥 FlyKhiva Excel olish', callback_data: 'get_flykhiva' },
+              { text: '📥 Prestige Excel olish', callback_data: 'get_prestige' },
+            ],
           ],
-        ],
-      });
+        });
+      } catch (parseErr: any) {
+        await sendTelegramReply(`❌ <b>Tahlil xatosi:</b> ${parseErr?.message || "Rasmni o'qib bo'lmadi"}`);
+      }
       res.json({ ok: true });
       return;
     }
@@ -622,11 +738,11 @@ app.get('/api/admin/status', (req: Request, res: Response) => {
     uptimeSeconds: uptimeSec,
     nodeVersion: process.version,
     memoryUsageMb: memMb,
-    aiEngineStatus: 'active',
+    aiEngineStatus: getEffectiveGeminiKey() ? 'active' : 'missing_key',
     telegramWebhookConfigured: Boolean(botToken),
     telegramBotUsername: '@grandturanai_bot',
     renderDeployHookConfigured: Boolean(deployHookUrl),
-    githubRepo: 'grand-turan-ai/passport-studio',
+    githubRepo: 'maxpubg2080-ctrl/Grand-Turan-AI---v2.4-Release',
   });
 });
 

@@ -1,6 +1,13 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { parseMrzLines, formatUzbekDate, formatDotDate, ensureDotDate } from './mrzParser';
+import {
+  parseMrzLines,
+  parsePassportTextRegex,
+  stripPatronymic,
+  formatUzbekDate,
+  formatDotDate,
+  ensureDotDate,
+} from './mrzParser';
 import { generatePrestigeWorkbook, generateFlyKhivaWorkbook } from './excelGenerator';
 import { PassportRecord } from '../types/passport';
 
@@ -20,6 +27,12 @@ test('ensureDotDate normalizes Uzbek and ISO dates to DD.MM.YYYY', () => {
   assert.equal(ensureDotDate('22.09.1961'), '22.09.1961');
 });
 
+test('stripPatronymic removes father name / patronymics and preserves given name', () => {
+  assert.equal(stripPatronymic("SARDOR ALISHER O'G'LI"), 'SARDOR');
+  assert.equal(stripPatronymic('MALIKA AKMAL QIZI'), 'MALIKA');
+  assert.equal(stripPatronymic('ANVAR'), 'ANVAR');
+});
+
 test('parseMrzLines extracts standard ICAO 9303 TD3 Uzbek passport', () => {
   const line1 = 'P<UZBKARIMOV<<SARDOR<<<<<<<<<<<<<<<<<<<<<<<<';
   const line2 = 'FA12345678UZB9005142M3301095<<<<<<<<<<<<<<02';
@@ -36,6 +49,12 @@ test('parseMrzLines extracts standard ICAO 9303 TD3 Uzbek passport', () => {
   assert.equal(record.birthDate, '1990-yil 14-may');
   assert.equal(record.expiryDate, '09.01.2033');
   assert.equal(record.nationality, "O'zbekiston");
+});
+
+test('parseMrzLines and parsePassportTextRegex NEVER fabricate fake records on invalid input', () => {
+  assert.equal(parseMrzLines(''), null);
+  assert.equal(parseMrzLines('random blurry image text without passport number'), null);
+  assert.equal(parsePassportTextRegex('PASSPORT REPUBLIC OF UZBEKISTAN FA 1234567'), null);
 });
 
 test('generatePrestigeWorkbook matches exact TAS SHARM format with patronymic empty', async () => {

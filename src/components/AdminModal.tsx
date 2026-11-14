@@ -61,8 +61,6 @@ export const AdminModal: React.FC<AdminModalProps> = ({
   const [stats, setStats] = useState<AdminSystemStats | null>(null);
   const [botToken, setBotToken] = useState('');
   const [deployHookUrl, setDeployHookUrl] = useState('');
-  const [adminApiKey, setAdminApiKey] = useState(() => localStorage.getItem('gemini_api_key') || '');
-  const [apiKeySaved, setApiKeySaved] = useState(false);
   const [deploying, setDeploying] = useState(false);
   const [deployResult, setDeployResult] = useState<string | null>(null);
   const [settingsSuccess, setSettingsSuccess] = useState(false);
@@ -370,50 +368,27 @@ export const AdminModal: React.FC<AdminModalProps> = ({
                       </div>
                     </div>
 
-                    {/* Gemini AI API Key */}
+                    {/* Server-side AI Status (Configured via Environment Secrets) */}
                     <div className="p-4 rounded-xl bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 space-y-2 md:col-span-2">
                       <div className="flex items-center justify-between">
                         <span className="text-xs font-bold text-slate-800 dark:text-slate-200 flex items-center gap-1.5">
-                          <KeyRound className="w-4 h-4 text-amber-500" />
-                          Google AI Studio — Gemini API Kaliti
+                          <Cpu className="w-4 h-4 text-amber-500" />
+                          Gemini AI Vision Dvigateli (gemini-4-hydrogen)
                         </span>
-                        <a
-                          href="https://aistudio.google.com/app/apikey"
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          className="text-[11px] text-indigo-500 hover:underline flex items-center gap-1 font-medium"
+                        <span
+                          className={`text-[10px] font-bold px-2.5 py-0.5 rounded-full ${
+                            stats?.aiEngineStatus === 'active'
+                              ? 'bg-emerald-500/15 text-emerald-600 dark:text-emerald-400 border border-emerald-500/30'
+                              : 'bg-rose-500/15 text-rose-600 dark:text-rose-400 border border-rose-500/30'
+                          }`}
                         >
-                          Bepul API kalit olish <ExternalLink className="w-3 h-3" />
-                        </a>
-                      </div>
-                      <div className="flex gap-2">
-                        <input
-                          type="password"
-                          placeholder="AIzaSy..."
-                          value={adminApiKey}
-                          onChange={(e) => setAdminApiKey(e.target.value)}
-                          className="flex-1 text-xs font-mono px-3 py-2 rounded-lg border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-900 text-slate-900 dark:text-white"
-                        />
-                        <button
-                          type="button"
-                          onClick={() => {
-                            const trimmed = adminApiKey.trim();
-                            localStorage.setItem('gemini_api_key', trimmed);
-                            fetch('/api/admin/api-key', {
-                              method: 'POST',
-                              headers: { 'Content-Type': 'application/json' },
-                              body: JSON.stringify({ apiKey: trimmed }),
-                            }).catch(() => {});
-                            setApiKeySaved(true);
-                            setTimeout(() => setApiKeySaved(false), 2000);
-                          }}
-                          className="px-4 py-2 rounded-lg text-xs font-bold bg-amber-500 hover:bg-amber-600 text-white transition-all cursor-pointer whitespace-nowrap"
-                        >
-                          {apiKeySaved ? '✓ Saqlandi!' : 'Kalitni Saqlash'}
-                        </button>
+                          {stats?.aiEngineStatus === 'active'
+                            ? '● Server Kaliti Faol'
+                            : '○ GEMINI_API_KEY Sozlanmagan'}
+                        </span>
                       </div>
                       <p className="text-[11px] text-slate-500 dark:text-slate-400">
-                        Ushbu kalit kiritilganda, barcha yuklangan pasportlar (sayt va Telegram orqali) Google Gemini AI yordamida har bir odamning haqiqiy ism, familiya va pasport raqamlarini 100% aniqlikda chiqaradi.
+                        Xavfsizlik talablariga muvofiq <code className="font-mono">GEMINI_API_KEY</code> faqat server muhitida (AI Studio <b>Settings &gt; Secrets</b> yoki Render <b>Environment Variables</b>) saqlanadi.
                       </p>
                     </div>
                   </div>
@@ -493,7 +468,7 @@ export const AdminModal: React.FC<AdminModalProps> = ({
                     <button
                       onClick={() =>
                         handleCopy(
-                          `git init\ngit add .\ngit commit -m "Grand Turan AI - Pasport Studio"\ngit branch -M main\ngit remote add origin https://github.com/SIZNING_USERNAME/grand-turan-ai.git\ngit push -u origin main`,
+                          `git add .\ngit commit -m "Fix AI vision extraction and dark theme"\ngit branch -M main\ngit push -u origin main`,
                           'git'
                         )
                       }
@@ -504,11 +479,10 @@ export const AdminModal: React.FC<AdminModalProps> = ({
                     </button>
                   </div>
                   <pre className="p-3 rounded-xl bg-slate-900 text-slate-100 font-mono text-[11px] overflow-x-auto leading-relaxed">
-{`git init
+{`git remote set-url origin https://github.com/maxpubg2080-ctrl/Grand-Turan-AI---v2.4-Release.git
 git add .
-git commit -m "Grand Turan AI - Pasport Studio"
+git commit -m "Fix AI vision extraction and dark theme"
 git branch -M main
-git remote add origin https://github.com/SIZNING_USERNAME/grand-turan-ai.git
 git push -u origin main`}
                   </pre>
                 </div>
