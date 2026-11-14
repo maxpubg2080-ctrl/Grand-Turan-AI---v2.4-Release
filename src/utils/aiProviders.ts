@@ -5,10 +5,15 @@ export function collectProviderKeys(
   const candidates: Array<string | undefined> = [
     env[`${prefix}_API_KEY`],
     env[`${prefix}_API_KEY_1`],
+    env[`${prefix}_API_KEY1`],
     env[`${prefix}_API_KEY_2`],
+    env[`${prefix}_API_KEY2`],
     env[`${prefix}_API_KEY_3`],
+    env[`${prefix}_API_KEY3`],
     env[`${prefix}_API_KEY_4`],
+    env[`${prefix}_API_KEY4`],
     env[`${prefix}_API_KEY_5`],
+    env[`${prefix}_API_KEY5`],
   ];
 
   const listRaw = env[`${prefix}_API_KEYS`];

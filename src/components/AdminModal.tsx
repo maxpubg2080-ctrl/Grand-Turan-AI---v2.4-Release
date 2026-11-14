@@ -477,7 +477,7 @@ export const AdminModal: React.FC<AdminModalProps> = ({
                         </div>
                       )}
                       <p className="text-[11px] text-slate-500 dark:text-slate-400">
-                        Agar bir kalit yoki modelning kunlik limiti tugasa, server avtomatik keyingisiga o'tadi: har bir provayderdan 3 tadan — <code className="font-mono">GEMINI_API_KEY</code> (<code className="font-mono">_2, _3</code>), <code className="font-mono">GROQ_API_KEY</code> (<code className="font-mono">_2, _3</code>), <code className="font-mono">OPENROUTER_API_KEY</code> (<code className="font-mono">_2, _3</code>), <code className="font-mono">MISTRAL_API_KEY</code> (<code className="font-mono">_2, _3</code>) — jami 12+ kalit qo'llab-quvvatlanadi.
+                        Agar bir kalit yoki modelning kunlik limiti tugasa, server avtomatik keyingisiga o'tadi: <code className="font-mono">GEMINI_API_KEY</code> (<code className="font-mono">_2, _3</code>), <code className="font-mono">GROQ_API_KEY</code> (<code className="font-mono">_2, _3</code>), <code className="font-mono">GITHUB_API_KEY</code> (<code className="font-mono">_2, _3</code>), <code className="font-mono">OPENROUTER_API_KEY</code> (<code className="font-mono">_2, _3</code>) hamda <code className="font-mono">SAMBANOVA_API_KEY</code> — barchasi kartasiz bepul!
                       </p>
                     </div>
                   </div>
@@ -624,7 +624,16 @@ git push -u origin main`}
                         rel="noopener noreferrer"
                         className="flex items-center justify-between px-2.5 py-1.5 rounded-lg bg-sky-500/10 text-sky-700 dark:text-sky-300 border border-sky-500/20 hover:bg-sky-500/20 transition-colors"
                       >
-                        <span>2. Groq Console (~1000/kun bepul)</span>
+                        <span>2. Groq Console (~1000/kun kartasiz)</span>
+                        <ExternalLink className="w-3 h-3 shrink-0" />
+                      </a>
+                      <a
+                        href="https://github.com/settings/tokens"
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="flex items-center justify-between px-2.5 py-1.5 rounded-lg bg-emerald-500/10 text-emerald-700 dark:text-emerald-300 border border-emerald-500/20 hover:bg-emerald-500/20 transition-colors"
+                      >
+                        <span>3. GitHub Models (GPT-4o-mini bepul)</span>
                         <ExternalLink className="w-3 h-3 shrink-0" />
                       </a>
                       <a
@@ -633,16 +642,16 @@ git push -u origin main`}
                         rel="noopener noreferrer"
                         className="flex items-center justify-between px-2.5 py-1.5 rounded-lg bg-indigo-500/10 text-indigo-700 dark:text-indigo-300 border border-indigo-500/20 hover:bg-indigo-500/20 transition-colors"
                       >
-                        <span>3. OpenRouter (:free vision)</span>
+                        <span>4. OpenRouter (:free vision)</span>
                         <ExternalLink className="w-3 h-3 shrink-0" />
                       </a>
                       <a
-                        href="https://console.mistral.ai/api-keys"
+                        href="https://cloud.sambanova.ai/apis"
                         target="_blank"
                         rel="noopener noreferrer"
-                        className="flex items-center justify-between px-2.5 py-1.5 rounded-lg bg-emerald-500/10 text-emerald-700 dark:text-emerald-300 border border-emerald-500/20 hover:bg-emerald-500/20 transition-colors"
+                        className="sm:col-span-2 flex items-center justify-between px-2.5 py-1.5 rounded-lg bg-purple-500/10 text-purple-700 dark:text-purple-300 border border-purple-500/20 hover:bg-purple-500/20 transition-colors"
                       >
-                        <span>4. Mistral Console (Pixtral)</span>
+                        <span>5. SambaNova Cloud (Llama Vision — 100% kartasiz bepul)</span>
                         <ExternalLink className="w-3 h-3 shrink-0" />
                       </a>
                     </div>
@@ -651,8 +660,9 @@ git push -u origin main`}
                       <div>NODE_ENV = production</div>
                       <div>GEMINI_API_KEY / GEMINI_API_KEY_2 / GEMINI_API_KEY_3</div>
                       <div>GROQ_API_KEY / GROQ_API_KEY_2 / GROQ_API_KEY_3</div>
+                      <div>GITHUB_API_KEY / GITHUB_API_KEY_2 / GITHUB_API_KEY_3</div>
                       <div>OPENROUTER_API_KEY / OPENROUTER_API_KEY_2 / OPENROUTER_API_KEY_3</div>
-                      <div>MISTRAL_API_KEY / MISTRAL_API_KEY_2 / MISTRAL_API_KEY_3</div>
+                      <div>SAMBANOVA_API_KEY / SAMBANOVA_API_KEY_2 / SAMBANOVA_API_KEY_3</div>
                       <div>TELEGRAM_BOT_TOKEN = &lt;BotFather tokeni&gt;</div>
                       <div>RENDER_DEPLOY_HOOK_URL = &lt;Settings -&gt; Deploy Hook URL&gt;</div>
                     </div>

@@ -53,10 +53,17 @@ function getEffectiveGeminiKey(): string {
 }
 
 function getExternalProviderKeys() {
+  const githubKeys = collectProviderKeys(process.env, 'GITHUB');
+  const legacyGhToken = (process.env.GITHUB_TOKEN || '').trim();
+  if (legacyGhToken.length >= 10 && !githubKeys.includes(legacyGhToken)) {
+    githubKeys.push(legacyGhToken);
+  }
   return {
     groq: collectProviderKeys(process.env, 'GROQ'),
-    mistral: collectProviderKeys(process.env, 'MISTRAL'),
+    github: githubKeys,
     openrouter: collectProviderKeys(process.env, 'OPENROUTER'),
+    sambanova: collectProviderKeys(process.env, 'SAMBANOVA'),
+    mistral: collectProviderKeys(process.env, 'MISTRAL'),
   };
 }
 
@@ -68,8 +75,10 @@ function getActiveEngineLabels(): string[] {
   }
   const ext = getExternalProviderKeys();
   if (ext.groq.length > 0) labels.push(`Groq Vision (${ext.groq.length} kalit)`);
-  if (ext.mistral.length > 0) labels.push(`Mistral Pixtral (${ext.mistral.length} kalit)`);
+  if (ext.github.length > 0) labels.push(`GitHub Models (${ext.github.length} kalit)`);
   if (ext.openrouter.length > 0) labels.push(`OpenRouter :free (${ext.openrouter.length} kalit)`);
+  if (ext.sambanova.length > 0) labels.push(`SambaNova Vision (${ext.sambanova.length} kalit)`);
+  if (ext.mistral.length > 0) labels.push(`Mistral Pixtral (${ext.mistral.length} kalit)`);
   labels.push('Offline MRZ Checksum');
   return labels;
 }
@@ -382,11 +391,13 @@ async function parsePassportImage(
   if (
     geminiKeys.length === 0 &&
     extKeys.groq.length === 0 &&
-    extKeys.mistral.length === 0 &&
-    extKeys.openrouter.length === 0
+    extKeys.github.length === 0 &&
+    extKeys.openrouter.length === 0 &&
+    extKeys.sambanova.length === 0 &&
+    extKeys.mistral.length === 0
   ) {
     throw new AppApiError(
-      "Serverda birorta ham AI kaliti sozlanmagan (GEMINI_API_KEY, GROQ_API_KEY, MISTRAL_API_KEY yoki OPENROUTER_API_KEY kiriting, yoki Offline MRZ matn rejimidan foydalaning).",
+      "Serverda birorta ham AI kaliti sozlanmagan (GEMINI_API_KEY, GROQ_API_KEY, GITHUB_API_KEY, OPENROUTER_API_KEY yoki SAMBANOVA_API_KEY kiriting, yoki Offline MRZ matn rejimidan foydalaning).",
       400
     );
   }
@@ -434,22 +445,24 @@ async function parsePassportImage(
     });
   }
 
-  // 3. Mistral Pixtral Free Fallback (rotates across all configured MISTRAL_API_KEY_1..N)
-  extKeys.mistral.forEach((key, idx) => {
-    const suffix = extKeys.mistral.length > 1 ? `#${idx + 1}` : '';
-    attempts.push({
-      id: `mistral:pixtral-12b-2409:${idx}`,
-      label: `mistral:pixtral-12b${suffix}`,
-      run: () =>
-        callOpenAiCompatibleVision(
-          'https://api.mistral.ai/v1/chat/completions',
-          key,
-          'pixtral-12b-2409',
-          cleanBase64,
-          mimeType
-        ),
+  // 3. GitHub Models Free Vision Fallback (rotates across GITHUB_API_KEY_1..N / GITHUB_TOKEN)
+  for (const model of ['openai/gpt-4o-mini', 'meta/llama-3.2-90b-vision-instruct']) {
+    extKeys.github.forEach((key, idx) => {
+      const suffix = extKeys.github.length > 1 ? `#${idx + 1}` : '';
+      attempts.push({
+        id: `github:${model}:${idx}`,
+        label: `github:${model.split('/').pop()}${suffix}`,
+        run: () =>
+          callOpenAiCompatibleVision(
+            'https://models.github.ai/inference/chat/completions',
+            key,
+            model,
+            cleanBase64,
+            mimeType
+          ),
+      });
     });
-  });
+  }
 
   // 4. OpenRouter Free Vision Models Fallback (rotates across all configured OPENROUTER_API_KEY_1..N)
   for (const model of ['google/gemma-3-27b-it:free', 'qwen/qwen2.5-vl-72b-instruct:free', 'openrouter/free']) {
@@ -470,6 +483,42 @@ async function parsePassportImage(
       });
     });
   }
+
+  // 5. SambaNova Cloud Free Vision Fallback (no credit card required)
+  for (const model of ['Llama-3.2-90B-Vision-Instruct', 'Llama-3.2-11B-Vision-Instruct']) {
+    extKeys.sambanova.forEach((key, idx) => {
+      const suffix = extKeys.sambanova.length > 1 ? `#${idx + 1}` : '';
+      attempts.push({
+        id: `sambanova:${model}:${idx}`,
+        label: `sambanova:${model}${suffix}`,
+        run: () =>
+          callOpenAiCompatibleVision(
+            'https://api.sambanova.ai/v1/chat/completions',
+            key,
+            model,
+            cleanBase64,
+            mimeType
+          ),
+      });
+    });
+  }
+
+  // 6. Optional Mistral Pixtral Fallback (if user activated Experiment plan)
+  extKeys.mistral.forEach((key, idx) => {
+    const suffix = extKeys.mistral.length > 1 ? `#${idx + 1}` : '';
+    attempts.push({
+      id: `mistral:pixtral-12b-2409:${idx}`,
+      label: `mistral:pixtral-12b${suffix}`,
+      run: () =>
+        callOpenAiCompatibleVision(
+          'https://api.mistral.ai/v1/chat/completions',
+          key,
+          'pixtral-12b-2409',
+          cleanBase64,
+          mimeType
+        ),
+    });
+  });
 
   let lastErrorMsg = '';
   const rpmPausedCandidates: typeof attempts = [];
@@ -1064,8 +1113,10 @@ app.get('/api/admin/status', (req: Request, res: Response) => {
   const hasAnyAi = Boolean(
     getEffectiveGeminiKey() ||
       ext.groq.length > 0 ||
-      ext.mistral.length > 0 ||
-      ext.openrouter.length > 0
+      ext.github.length > 0 ||
+      ext.openrouter.length > 0 ||
+      ext.sambanova.length > 0 ||
+      ext.mistral.length > 0
   );
 
   res.json({

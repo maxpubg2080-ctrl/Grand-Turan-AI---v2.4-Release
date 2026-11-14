@@ -285,21 +285,26 @@ test('collectProviderKeys gathers 3 keys per provider (12 total) and skips place
     GROQ_API_KEY_2: 'gsk_test_two_123456',
     GROQ_API_KEY_3: 'gsk_test_three_123456',
     OPENROUTER_API_KEYS: 'sk-or-v1-alpha123456, sk-or-v1-beta123456, sk-or-v1-gamma123456',
-    MISTRAL_API_KEY: 'mistral_key_one_1234',
-    MISTRAL_API_KEY_2: 'mistral_key_two_1234',
-    MISTRAL_API_KEY_3: 'mistral_key_three_1234',
+    GITHUB_API_KEY: 'github_pat_one_123456',
+    GITHUB_API_KEY2: 'github_pat_two_123456',
+    GITHUB_API_KEY3: 'github_pat_three_1234',
+    SAMBANOVA_API_KEY: 'sambanova_key_one_123',
+    SAMBANOVA_API_KEY2: 'sambanova_key_two_123',
+    SAMBANOVA_API_KEY3: 'sambanova_key_three_1',
   };
 
   const gemini = collectProviderKeys(mockEnv, 'GEMINI');
   const groq = collectProviderKeys(mockEnv, 'GROQ');
   const openrouter = collectProviderKeys(mockEnv, 'OPENROUTER');
-  const mistral = collectProviderKeys(mockEnv, 'MISTRAL');
+  const github = collectProviderKeys(mockEnv, 'GITHUB');
+  const sambanova = collectProviderKeys(mockEnv, 'SAMBANOVA');
 
   assert.equal(gemini.length, 3);
   assert.equal(gemini[0], 'AIzaSyTestKeyOne12345');
   assert.equal(groq.length, 3);
   assert.equal(openrouter.length, 3);
-  assert.equal(mistral.length, 3);
-  assert.equal(gemini.length + groq.length + openrouter.length + mistral.length, 12);
+  assert.equal(github.length, 3);
+  assert.equal(sambanova.length, 3);
+  assert.equal(gemini.length + groq.length + openrouter.length + github.length + sambanova.length, 15);
 });
 
