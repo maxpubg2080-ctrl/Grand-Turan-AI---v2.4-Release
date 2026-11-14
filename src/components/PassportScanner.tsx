@@ -41,6 +41,7 @@ export const PassportScanner: React.FC<PassportScannerProps> = ({
   const [apiKey, setApiKey] = useState(() => localStorage.getItem('gemini_api_key') || '');
   const [showKeyInput, setShowKeyInput] = useState(false);
   const [keySaved, setKeySaved] = useState(false);
+  const [errors, setErrors] = useState<string[]>([]);
 
   // Helper to read file as Base64
   const fileToBase64 = (file: File): Promise<string> => {
@@ -60,6 +61,8 @@ export const PassportScanner: React.FC<PassportScannerProps> = ({
     setProgress({ current: 0, total: validFiles.length });
 
     const newRecords: PassportRecord[] = [];
+    const newErrors: string[] = [];
+    setErrors([]);
 
     for (let i = 0; i < validFiles.length; i++) {
       const file = validFiles[i];
@@ -79,15 +82,23 @@ export const PassportScanner: React.FC<PassportScannerProps> = ({
           }),
         });
 
-        const data = await res.json();
-        if (data.record) {
+        const data = await res.json().catch(() => ({}));
+        if (res.ok && data.record) {
           data.record.sourceFileName = file.name;
           newRecords.push(data.record);
+        } else {
+          newErrors.push(`${file.name}: ${data.error || `Server xatosi (${res.status})`}`);
+          if (data.code === 'NO_API_KEY' || data.code === 'BAD_API_KEY') {
+            setShowKeyInput(true);
+            break; // kalitsiz qolgan rasmlarni yuborishdan foyda yo'q
+          }
         }
       } catch (err) {
         console.error('Failed to parse file:', file.name, err);
+        newErrors.push(`${file.name}: serverga ulanib bo'lmadi. Internetni tekshiring.`);
       }
     }
+    setErrors(newErrors);
 
     if (newRecords.length > 0) {
       onAddPassports(newRecords);
@@ -133,7 +144,7 @@ export const PassportScanner: React.FC<PassportScannerProps> = ({
       country: "O'zbekiston",
       rawMrz: `P<UZB${pick.sur}<<${pick.name}<<<<<<<<<<<<<<<<<<<\n${pick.ser}${pick.num}8UZB9005142${pick.gen}3301095<<<<<<<<<<<<<<02`,
       confidence: 0.99,
-      engineUsed: engineMode === 'ai' ? 'gemini-3.8-flash' : 'offline-mrz',
+      engineUsed: 'NAMUNA (soxta)',
       parsedAt: new Date().toISOString(),
     };
 
@@ -174,17 +185,6 @@ export const PassportScanner: React.FC<PassportScannerProps> = ({
               <span>{t.modeAiVision}</span>
             </button>
 
-            <button
-              onClick={() => setEngineMode('offline')}
-              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold transition-all ${
-                engineMode === 'offline'
-                  ? 'bg-sky-600 text-white shadow-xs'
-                  : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white'
-              }`}
-            >
-              <Zap className="w-3.5 h-3.5" />
-              <span>{t.modeOfflineMrz}</span>
-            </button>
           </div>
 
           {/* Thinking Mode toggle (for Gemini 4 Argon) */}
@@ -389,6 +389,24 @@ export const PassportScanner: React.FC<PassportScannerProps> = ({
           </div>
         )}
       </div>
+
+      {errors.length > 0 && (
+        <div className="mt-4 rounded-xl border border-red-500/40 bg-red-500/10 p-3 text-left">
+          <div className="flex items-center justify-between gap-2 mb-1">
+            <p className="text-sm font-bold text-red-600 dark:text-red-400">
+              ❌ {errors.length} ta rasm o‘qilmadi (ro‘yxatga qo‘shilmadi)
+            </p>
+            <button onClick={() => setErrors([])} className="text-xs text-red-500 underline">
+              Yopish
+            </button>
+          </div>
+          <ul className="space-y-1 text-xs text-red-700 dark:text-red-300 list-disc pl-4">
+            {errors.map((e, idx) => (
+              <li key={idx}>{e}</li>
+            ))}
+          </ul>
+        </div>
+      )}
     </div>
   );
 };
