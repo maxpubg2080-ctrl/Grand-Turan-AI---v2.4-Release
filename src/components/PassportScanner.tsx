@@ -51,6 +51,46 @@ export const PassportScanner: React.FC<PassportScannerProps> = ({
     });
   };
 
+  // Shrink high-resolution camera photos to <= 1600px JPEG (~250 KB) for 5x faster AI OCR
+  // and full compatibility with Groq/GitHub/Gemini payload limits.
+  const prepareImagePayload = async (file: File): Promise<{ base64: string; mimeType: string }> => {
+    const rawBase64 = await fileToBase64(file);
+    try {
+      const img = await new Promise<HTMLImageElement>((resolve, reject) => {
+        const el = new Image();
+        el.onload = () => resolve(el);
+        el.onerror = () => reject(new Error('Image decode failed'));
+        el.src = rawBase64;
+      });
+
+      const maxDim = 1600;
+      const scale = Math.min(1, maxDim / Math.max(img.naturalWidth || 1, img.naturalHeight || 1));
+      const targetW = Math.max(1, Math.round(img.naturalWidth * scale));
+      const targetH = Math.max(1, Math.round(img.naturalHeight * scale));
+
+      // Skip re-encoding if already small enough and compact JPEG
+      if (scale === 1 && file.size <= 450 * 1024 && file.type === 'image/jpeg') {
+        return { base64: rawBase64, mimeType: 'image/jpeg' };
+      }
+
+      const canvas = document.createElement('canvas');
+      canvas.width = targetW;
+      canvas.height = targetH;
+      const ctx = canvas.getContext('2d');
+      if (!ctx) {
+        return { base64: rawBase64, mimeType: file.type || 'image/jpeg' };
+      }
+      ctx.drawImage(img, 0, 0, targetW, targetH);
+      const compressedDataUrl = canvas.toDataURL('image/jpeg', 0.85);
+      if (compressedDataUrl && compressedDataUrl.startsWith('data:image/jpeg;base64,')) {
+        return { base64: compressedDataUrl, mimeType: 'image/jpeg' };
+      }
+    } catch {
+      // Fallback safely to original image if canvas compression is unavailable
+    }
+    return { base64: rawBase64, mimeType: file.type || 'image/jpeg' };
+  };
+
   const handleFiles = async (files: FileList | File[]) => {
     const validFiles = Array.from(files).filter((f) => f.type.startsWith('image/'));
     if (validFiles.length === 0) return;
@@ -59,39 +99,73 @@ export const PassportScanner: React.FC<PassportScannerProps> = ({
     setIsProcessing(true);
     setProgress({ current: 0, total: validFiles.length });
 
-    const newRecords: PassportRecord[] = [];
-    const errors: string[] = [];
+    const orderedRecords: Array<PassportRecord | null> = new Array(validFiles.length).fill(null);
+    const orderedErrors: Array<string | null> = new Array(validFiles.length).fill(null);
+    let nextIndex = 0;
+    let completedCount = 0;
+    const CONCURRENCY = Math.min(3, validFiles.length);
+    const CLIENT_TIMEOUT_MS = 50_000;
 
-    for (let i = 0; i < validFiles.length; i++) {
-      const file = validFiles[i];
-      setProgress({ current: i + 1, total: validFiles.length });
+    const processOne = async (idx: number) => {
+      const file = validFiles[idx];
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), CLIENT_TIMEOUT_MS);
 
       try {
-        const base64 = await fileToBase64(file);
+        const { base64, mimeType } = await prepareImagePayload(file);
         const res = await fetch('/api/parse', {
           method: 'POST',
+          signal: controller.signal,
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             imageBase64: base64,
-            mimeType: file.type || 'image/jpeg',
+            mimeType,
             mode: engineMode,
             useThinking,
           }),
         });
 
-        const data = await res.json();
-        if (!res.ok || !data.record) {
-          errors.push(`${file.name}: ${data.error || "Rasmni o'qib bo'lmadi"}`);
-          continue;
+        const rawText = await res.text();
+        let data: any = null;
+        try {
+          data = rawText ? JSON.parse(rawText) : {};
+        } catch {
+          orderedErrors[idx] = `${file.name}: Server javobi noto‘g‘ri (HTTP ${res.status} — Render uyg‘onmoqda yoki band bo‘lishi mumkin)`;
+          return;
+        }
+
+        if (!res.ok || !data?.record) {
+          orderedErrors[idx] = `${file.name}: ${data?.error || "Rasmni o'qib bo'lmadi"}`;
+          return;
         }
 
         data.record.sourceFileName = file.name;
-        newRecords.push(data.record);
+        orderedRecords[idx] = data.record;
       } catch (err: any) {
-        console.error('Failed to parse file:', file.name, err);
-        errors.push(`${file.name}: ${err?.message || "Server bilan bog'lanishda xatolik"}`);
+        if (err?.name === 'AbortError') {
+          orderedErrors[idx] = `${file.name}: Server javobi kechikdi (50 soniya timeout) — qayta urinib ko‘ring`;
+        } else {
+          console.error('Failed to parse file:', file.name, err);
+          orderedErrors[idx] = `${file.name}: ${err?.message || "Server bilan bog'lanishda xatolik"}`;
+        }
+      } finally {
+        clearTimeout(timeoutId);
+        completedCount++;
+        setProgress({ current: completedCount, total: validFiles.length });
       }
-    }
+    };
+
+    const workers = Array.from({ length: CONCURRENCY }, async () => {
+      while (nextIndex < validFiles.length) {
+        const currentIdx = nextIndex++;
+        await processOne(currentIdx);
+      }
+    });
+
+    await Promise.all(workers);
+
+    const newRecords = orderedRecords.filter((r): r is PassportRecord => r !== null);
+    const errors = orderedErrors.filter((e): e is string => e !== null);
 
     if (errors.length > 0) {
       setScanErrors(errors);
@@ -392,6 +466,9 @@ export const PassportScanner: React.FC<PassportScannerProps> = ({
               <div className="text-sm font-bold text-slate-800 dark:text-slate-100">
                 Pasportlar sun'iy intellekt orqali o'qilmoqda... ({progress.current}/{progress.total})
               </div>
+              <p className="text-[11px] text-slate-500 dark:text-slate-400">
+                Rasmlar avtomatik siqilib, tezkor parallel oqimda tahlil qilinmoqda
+              </p>
               <div className="w-64 h-2 bg-slate-200 dark:bg-slate-700 rounded-full overflow-hidden">
                 <div
                   className="h-full bg-amber-500 transition-all duration-300 rounded-full"

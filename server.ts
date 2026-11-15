@@ -20,7 +20,11 @@ import {
   resolvePassengerTitle,
 } from './src/utils/mrzParser.ts';
 import { generatePrestigeWorkbook, generateFlyKhivaWorkbook, workbookToBuffer } from './src/utils/excelGenerator.ts';
-import { collectProviderKeys } from './src/utils/aiProviders.ts';
+import {
+  collectProviderKeys,
+  rotateProviderKeys,
+  interleaveProviderQueues,
+} from './src/utils/aiProviders.ts';
 import { PassportRecord, FlightDetails } from './src/types/passport.ts';
 
 dotenv.config();
@@ -43,6 +47,18 @@ let prestigeExports = 0;
 let flykhivaExports = 0;
 let botToken = process.env.TELEGRAM_BOT_TOKEN || '';
 let deployHookUrl = process.env.RENDER_DEPLOY_HOOK_URL || '';
+
+function resolvePublicAppUrl(req?: Request): string {
+  const host = req?.get('host') || '';
+  if (host && !host.includes('localhost') && !host.includes('127.0.0.1')) {
+    return `https://${host}`;
+  }
+  const envUrl = (process.env.RENDER_EXTERNAL_URL || process.env.APP_URL || '').trim();
+  if (envUrl.startsWith('https://') && !envUrl.includes('MY_APP_URL')) {
+    return envUrl.replace(/\/+$/, '');
+  }
+  return 'https://grand-turan-ai-v2-4-release.onrender.com';
+}
 
 function getGeminiKeys(): string[] {
   return collectProviderKeys(process.env, 'GEMINI');
@@ -71,7 +87,7 @@ function getActiveEngineLabels(): string[] {
   const labels: string[] = [];
   const geminiKeys = getGeminiKeys();
   if (geminiKeys.length > 0) {
-    labels.push(`Gemini (${geminiKeys.length} kalit • 4 model)`);
+    labels.push(`Gemini (${geminiKeys.length} kalit • 3 model)`);
   }
   const ext = getExternalProviderKeys();
   if (ext.groq.length > 0) labels.push(`Groq Vision (${ext.groq.length} kalit)`);
@@ -253,11 +269,41 @@ function buildNormalizedRecord(parsedJson: Record<string, any>, engineName: stri
   };
 }
 
+let keyRotationCursor = 0;
+
+function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: string, onTimeout?: () => void): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      try {
+        onTimeout?.();
+      } catch {
+        // ignore abort errors
+      }
+      const err: any = new Error(`${label} timeout (${Math.round(timeoutMs / 1000)}s)`);
+      err.isTimeout = true;
+      reject(err);
+    }, timeoutMs);
+
+    promise.then(
+      (val) => {
+        clearTimeout(timer);
+        resolve(val);
+      },
+      (err) => {
+        clearTimeout(timer);
+        reject(err);
+      }
+    );
+  });
+}
+
 async function callGeminiModel(
   apiKey: string,
   modelName: string,
   cleanBase64: string,
-  mimeType: string
+  mimeType: string,
+  useThinking: boolean,
+  timeoutMs: number
 ): Promise<string> {
   const client = new GoogleGenAI({
     apiKey,
@@ -268,7 +314,9 @@ async function callGeminiModel(
     },
   });
 
+  const controller = new AbortController();
   const config: Record<string, any> = {
+    abortSignal: controller.signal,
     systemInstruction: OCR_SYSTEM_PROMPT,
     responseMimeType: 'application/json',
     responseSchema: {
@@ -296,27 +344,36 @@ async function callGeminiModel(
 
   if (modelName === 'gemini-4-hydrogen') {
     config.thinkingConfig = {
-      thinkingLevel: ThinkingLevel.HIGH,
+      thinkingLevel: useThinking ? ThinkingLevel.MEDIUM : ThinkingLevel.LOW,
+    };
+  } else if (modelName === 'gemini-2.5-flash' && !useThinking) {
+    config.thinkingConfig = {
+      thinkingBudget: 0,
     };
   }
 
-  const response = await client.models.generateContent({
-    model: modelName,
-    contents: {
-      parts: [
-        {
-          inlineData: {
-            mimeType,
-            data: cleanBase64,
+  const response = await withTimeout(
+    client.models.generateContent({
+      model: modelName,
+      contents: {
+        parts: [
+          {
+            inlineData: {
+              mimeType,
+              data: cleanBase64,
+            },
           },
-        },
-        {
-          text: 'Transcribe the exact passport details and MRZ from this image into JSON. Do not include patronymic. Do not invent any data.',
-        },
-      ],
-    },
-    config,
-  });
+          {
+            text: 'Transcribe the exact passport details and MRZ from this image into JSON. Do not include patronymic. Do not invent any data.',
+          },
+        ],
+      },
+      config,
+    }),
+    timeoutMs,
+    modelName,
+    () => controller.abort()
+  );
 
   return response.text || '';
 }
@@ -327,48 +384,66 @@ async function callOpenAiCompatibleVision(
   model: string,
   cleanBase64: string,
   mimeType: string,
-  extraHeaders: Record<string, string> = {}
+  extraHeaders: Record<string, string> = {},
+  timeoutMs: number = 12_000
 ): Promise<string> {
-  const res = await fetch(endpoint, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${apiKey}`,
-      ...extraHeaders,
-    },
-    body: JSON.stringify({
-      model,
-      temperature: 0.1,
-      messages: [
-        { role: 'system', content: OCR_SYSTEM_PROMPT },
-        {
-          role: 'user',
-          content: [
-            { type: 'text', text: OPENAI_VISION_USER_PROMPT },
-            {
-              type: 'image_url',
-              image_url: { url: `data:${mimeType};base64,${cleanBase64}` },
-            },
-          ],
-        },
-      ],
-    }),
-  });
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
 
-  if (!res.ok) {
-    const errBody = await res.text().catch(() => '');
-    const err: any = new Error(`HTTP ${res.status}: ${errBody || res.statusText}`);
-    err.status = res.status;
+  try {
+    const res = await fetch(endpoint, {
+      method: 'POST',
+      signal: controller.signal,
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${apiKey}`,
+        ...extraHeaders,
+      },
+      body: JSON.stringify({
+        model,
+        temperature: 0.1,
+        max_tokens: 900,
+        messages: [
+          { role: 'system', content: OCR_SYSTEM_PROMPT },
+          {
+            role: 'user',
+            content: [
+              { type: 'text', text: OPENAI_VISION_USER_PROMPT },
+              {
+                type: 'image_url',
+                image_url: { url: `data:${mimeType};base64,${cleanBase64}` },
+              },
+            ],
+          },
+        ],
+      }),
+    });
+
+    if (!res.ok) {
+      const errBody = await res.text().catch(() => '');
+      const err: any = new Error(`HTTP ${res.status}: ${errBody || res.statusText}`);
+      err.status = res.status;
+      throw err;
+    }
+
+    const json = await res.json();
+    return String(json?.choices?.[0]?.message?.content || '');
+  } catch (err: any) {
+    if (err?.name === 'AbortError' || controller.signal.aborted) {
+      const timeoutErr: any = new Error(`${model} timeout (${Math.round(timeoutMs / 1000)}s)`);
+      timeoutErr.isTimeout = true;
+      throw timeoutErr;
+    }
     throw err;
+  } finally {
+    clearTimeout(timer);
   }
-
-  const json = await res.json();
-  return String(json?.choices?.[0]?.message?.content || '');
 }
 
 function classifyProviderError(err: any) {
   const msg = String(err?.message || '');
   const status = err?.status || err?.code;
+  const isTimeout = Boolean(err?.isTimeout || err?.name === 'AbortError' || /timeout|aborted/i.test(msg));
   const isRateLimit =
     status === 429 || msg.includes('429') || msg.includes('RESOURCE_EXHAUSTED') || msg.includes('rate_limit');
   const isDailyLimit =
@@ -377,13 +452,13 @@ function classifyProviderError(err: any) {
   const isNotFound = status === 404 || msg.includes('404') || msg.includes('NOT_FOUND');
   const isAuthError =
     status === 401 || status === 403 || msg.includes('PERMISSION_DENIED') || msg.includes('API_KEY_INVALID');
-  return { msg, isRateLimit, isDailyLimit, isNotFound, isAuthError };
+  return { msg, isTimeout, isRateLimit, isDailyLimit, isNotFound, isAuthError };
 }
 
 async function parsePassportImage(
   cleanBase64: string,
   mimeType: string,
-  _useThinking: boolean = false
+  useThinking: boolean = false
 ): Promise<{ record: PassportRecord; engine: string }> {
   const geminiKeys = getGeminiKeys();
   const extKeys = getExternalProviderKeys();
@@ -402,35 +477,46 @@ async function parsePassportImage(
     );
   }
 
-  const attempts: Array<{
+  type AttemptSpec = {
     id: string;
     label: string;
     run: () => Promise<string>;
-  }> = [];
+  };
 
-  // 1. Primary Gemini Multi-Model & Multi-Key Cascade (20 RPD * models * projects)
-  const geminiModels = [
-    'gemini-4-hydrogen',
-    'gemini-3.8-flash',
-    'gemini-2.5-flash',
-    'gemini-3.1-flash-lite',
-  ];
+  const cursor = keyRotationCursor++;
+  const attemptTimeoutMs = useThinking ? 16_000 : 12_000;
+  const totalCascadeBudgetMs = 38_000;
+  const cascadeStart = Date.now();
+
+  // Build per-provider rotated queues so parallel & sequential calls spread across all keys
+  const geminiQueue: AttemptSpec[] = [];
+  const geminiModels = useThinking
+    ? ['gemini-4-hydrogen', 'gemini-2.5-flash', 'gemini-3.1-flash-lite']
+    : ['gemini-2.5-flash', 'gemini-4-hydrogen', 'gemini-3.1-flash-lite'];
+  const rotatedGeminiKeys = rotateProviderKeys(
+    geminiKeys.map((key, idx) => ({ key, idx })),
+    cursor
+  );
   for (const model of geminiModels) {
-    geminiKeys.forEach((key, idx) => {
+    for (const { key, idx } of rotatedGeminiKeys) {
       const suffix = geminiKeys.length > 1 ? `#${idx + 1}` : '';
-      attempts.push({
+      geminiQueue.push({
         id: `gemini:${model}:${idx}`,
         label: `${model}${suffix}`,
-        run: () => callGeminiModel(key, model, cleanBase64, mimeType),
+        run: () => callGeminiModel(key, model, cleanBase64, mimeType, useThinking, attemptTimeoutMs),
       });
-    });
+    }
   }
 
-  // 2. Groq Free Vision Fallback (rotates across all configured GROQ_API_KEY_1..N)
+  const groqQueue: AttemptSpec[] = [];
+  const rotatedGroqKeys = rotateProviderKeys(
+    extKeys.groq.map((key, idx) => ({ key, idx })),
+    cursor
+  );
   for (const model of ['meta-llama/llama-4-scout-17b-16e-instruct', 'meta-llama/llama-4-maverick-17b-16e-instruct']) {
-    extKeys.groq.forEach((key, idx) => {
+    for (const { key, idx } of rotatedGroqKeys) {
       const suffix = extKeys.groq.length > 1 ? `#${idx + 1}` : '';
-      attempts.push({
+      groqQueue.push({
         id: `groq:${model}:${idx}`,
         label: `groq:${model.split('/').pop()}${suffix}`,
         run: () =>
@@ -439,17 +525,23 @@ async function parsePassportImage(
             key,
             model,
             cleanBase64,
-            mimeType
+            mimeType,
+            {},
+            attemptTimeoutMs
           ),
       });
-    });
+    }
   }
 
-  // 3. GitHub Models Free Vision Fallback (rotates across GITHUB_API_KEY_1..N / GITHUB_TOKEN)
+  const githubQueue: AttemptSpec[] = [];
+  const rotatedGithubKeys = rotateProviderKeys(
+    extKeys.github.map((key, idx) => ({ key, idx })),
+    cursor
+  );
   for (const model of ['openai/gpt-4o-mini', 'meta/llama-3.2-90b-vision-instruct']) {
-    extKeys.github.forEach((key, idx) => {
+    for (const { key, idx } of rotatedGithubKeys) {
       const suffix = extKeys.github.length > 1 ? `#${idx + 1}` : '';
-      attempts.push({
+      githubQueue.push({
         id: `github:${model}:${idx}`,
         label: `github:${model.split('/').pop()}${suffix}`,
         run: () =>
@@ -458,17 +550,48 @@ async function parsePassportImage(
             key,
             model,
             cleanBase64,
-            mimeType
+            mimeType,
+            {},
+            attemptTimeoutMs
           ),
       });
-    });
+    }
   }
 
-  // 4. OpenRouter Free Vision Models Fallback (rotates across all configured OPENROUTER_API_KEY_1..N)
+  const sambanovaQueue: AttemptSpec[] = [];
+  const rotatedSambaKeys = rotateProviderKeys(
+    extKeys.sambanova.map((key, idx) => ({ key, idx })),
+    cursor
+  );
+  for (const model of ['Llama-3.2-90B-Vision-Instruct', 'Llama-3.2-11B-Vision-Instruct']) {
+    for (const { key, idx } of rotatedSambaKeys) {
+      const suffix = extKeys.sambanova.length > 1 ? `#${idx + 1}` : '';
+      sambanovaQueue.push({
+        id: `sambanova:${model}:${idx}`,
+        label: `sambanova:${model}${suffix}`,
+        run: () =>
+          callOpenAiCompatibleVision(
+            'https://api.sambanova.ai/v1/chat/completions',
+            key,
+            model,
+            cleanBase64,
+            mimeType,
+            {},
+            attemptTimeoutMs
+          ),
+      });
+    }
+  }
+
+  const openrouterQueue: AttemptSpec[] = [];
+  const rotatedOpenRouterKeys = rotateProviderKeys(
+    extKeys.openrouter.map((key, idx) => ({ key, idx })),
+    cursor
+  );
   for (const model of ['google/gemma-3-27b-it:free', 'qwen/qwen2.5-vl-72b-instruct:free', 'openrouter/free']) {
-    extKeys.openrouter.forEach((key, idx) => {
+    for (const { key, idx } of rotatedOpenRouterKeys) {
       const suffix = extKeys.openrouter.length > 1 ? `#${idx + 1}` : '';
-      attempts.push({
+      openrouterQueue.push({
         id: `openrouter:${model}:${idx}`,
         label: `openrouter:${model.split('/').pop()}${suffix}`,
         run: () =>
@@ -478,35 +601,21 @@ async function parsePassportImage(
             model,
             cleanBase64,
             mimeType,
-            { 'HTTP-Referer': 'https://grand-turan-ai.onrender.com', 'X-Title': 'Grand Turan AI' }
+            { 'HTTP-Referer': 'https://grand-turan-ai.onrender.com', 'X-Title': 'Grand Turan AI' },
+            attemptTimeoutMs
           ),
       });
-    });
+    }
   }
 
-  // 5. SambaNova Cloud Free Vision Fallback (no credit card required)
-  for (const model of ['Llama-3.2-90B-Vision-Instruct', 'Llama-3.2-11B-Vision-Instruct']) {
-    extKeys.sambanova.forEach((key, idx) => {
-      const suffix = extKeys.sambanova.length > 1 ? `#${idx + 1}` : '';
-      attempts.push({
-        id: `sambanova:${model}:${idx}`,
-        label: `sambanova:${model}${suffix}`,
-        run: () =>
-          callOpenAiCompatibleVision(
-            'https://api.sambanova.ai/v1/chat/completions',
-            key,
-            model,
-            cleanBase64,
-            mimeType
-          ),
-      });
-    });
-  }
-
-  // 6. Optional Mistral Pixtral Fallback (if user activated Experiment plan)
-  extKeys.mistral.forEach((key, idx) => {
+  const mistralQueue: AttemptSpec[] = [];
+  const rotatedMistralKeys = rotateProviderKeys(
+    extKeys.mistral.map((key, idx) => ({ key, idx })),
+    cursor
+  );
+  for (const { key, idx } of rotatedMistralKeys) {
     const suffix = extKeys.mistral.length > 1 ? `#${idx + 1}` : '';
-    attempts.push({
+    mistralQueue.push({
       id: `mistral:pixtral-12b-2409:${idx}`,
       label: `mistral:pixtral-12b${suffix}`,
       run: () =>
@@ -515,19 +624,35 @@ async function parsePassportImage(
           key,
           'pixtral-12b-2409',
           cleanBase64,
-          mimeType
+          mimeType,
+          {},
+          attemptTimeoutMs
         ),
     });
-  });
+  }
+
+  // Interleave fast providers round-by-round so one slow/blocked provider never stalls the rest
+  const attempts = interleaveProviderQueues([
+    geminiQueue,
+    groqQueue,
+    githubQueue,
+    sambanovaQueue,
+    openrouterQueue,
+    mistralQueue,
+  ]);
 
   let lastErrorMsg = '';
-  const rpmPausedCandidates: typeof attempts = [];
+  const rpmPausedCandidates: AttemptSpec[] = [];
   let sawOnlyAuthErrors = true;
   const triedLabels: string[] = [];
 
   for (const candidate of attempts) {
     if (isSlotOnCooldown(candidate.id)) {
       continue;
+    }
+    if (Date.now() - cascadeStart >= totalCascadeBudgetMs) {
+      lastErrorMsg = lastErrorMsg || `AI kaskad vaqti tugadi (${Math.round(totalCascadeBudgetMs / 1000)}s)`;
+      break;
     }
     triedLabels.push(candidate.label);
     try {
@@ -549,7 +674,7 @@ async function parsePassportImage(
       if (err instanceof AppApiError && err.statusCode === 422) {
         throw err;
       }
-      const { msg, isRateLimit, isDailyLimit, isNotFound, isAuthError } = classifyProviderError(err);
+      const { msg, isTimeout, isRateLimit, isDailyLimit, isNotFound, isAuthError } = classifyProviderError(err);
       lastErrorMsg = `${candidate.label}: ${msg}`;
 
       if (!isAuthError) {
@@ -562,16 +687,20 @@ async function parsePassportImage(
       } else if (isDailyLimit) {
         // Daily RPD limit reached -> cooldown for 15 min so next scans jump straight to fallback
         markSlotCooldown(candidate.id, 15 * 60_000);
+      } else if (isTimeout) {
+        // Timed out endpoint -> skip for 20s so parallel batch files try faster providers
+        markSlotCooldown(candidate.id, 20_000);
       } else if (isRateLimit) {
-        // Transient per-minute RPM limit -> remember to retry after short pause if all fallbacks hit RPM too
+        // Transient per-minute RPM limit -> short 15s cooldown & keep 1 retry candidate
+        markSlotCooldown(candidate.id, 15_000);
         rpmPausedCandidates.push(candidate);
       }
     }
   }
 
-  // If all available free models hit 5-RPM speed limit simultaneously, wait 12s once and retry top available candidate
-  if (rpmPausedCandidates.length > 0) {
-    await new Promise((r) => setTimeout(r, 12000));
+  // Short retry only if we still have ample budget remaining
+  if (rpmPausedCandidates.length > 0 && Date.now() - cascadeStart < 25_000) {
+    await new Promise((r) => setTimeout(r, 2_500));
     const retryTarget = rpmPausedCandidates[0];
     try {
       const responseText = await retryTarget.run();
@@ -588,7 +717,7 @@ async function parsePassportImage(
 
   if (triedLabels.length === 0) {
     throw new AppApiError(
-      "Barcha bepul AI modellarning kunlik limiti vaqtincha tugagan (15 daqiqada qayta tekshiriladi). Ungacha 'MRZ Matn (Offline)' rejimidan foydalaning yoki Render Environment ga GROQ_API_KEY / qo'shimcha kalit qo'shing.",
+      "Barcha bepul AI modellarning kunlik limiti vaqtincha tugagan (15 daqiqada qayta tekshiriladi). Ungacha 'MRZ Matn (Offline)' rejimidan foydalaning yoki qo'shimcha kalit qo'shing.",
       429
     );
   }
@@ -895,6 +1024,7 @@ app.post('/api/telegram/webhook', async (req: Request, res: Response) => {
         `• /status — Render server, AI va Baza holati\n` +
         `• /redeploy — Render serverni qayta yangilash`;
 
+      const webAppUrl = resolvePublicAppUrl(req);
       await sendTelegramReply(welcome, {
         inline_keyboard: [
           [
@@ -902,6 +1032,7 @@ app.post('/api/telegram/webhook', async (req: Request, res: Response) => {
             { text: '🏛 Prestige Rejimi', callback_data: 'mode_prestige' },
           ],
           [{ text: '📝 MRZ Matn Qoidalari (/mrz)', callback_data: 'show_mrz_rules' }],
+          [{ text: '🌐 Saytni Bot Ichida Ochish (Web App)', web_app: { url: webAppUrl } }],
         ],
       });
       res.json({ ok: true });
@@ -1156,13 +1287,26 @@ app.post('/api/admin/settings', async (req: Request, res: Response) => {
     const host = req.get('host') || '';
     const proto = req.get('x-forwarded-proto') || req.protocol || 'https';
     const webhookUrl = `${proto}://${host}/api/telegram/webhook`;
+    const webAppUrl = resolvePublicAppUrl(req);
     try {
       const tgRes = await fetch(
         `https://api.telegram.org/bot${botToken}/setWebhook?url=${encodeURIComponent(webhookUrl)}`
       );
       const tgData = await tgRes.json();
       if (tgData.ok) {
-        webhookMessage = `Telegram Webhook ulandi: ${webhookUrl}`;
+        // Also configure bottom-left "Open" Web App menu button inside Telegram bot chat
+        await fetch(`https://api.telegram.org/bot${botToken}/setChatMenuButton`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            menu_button: {
+              type: 'web_app',
+              text: 'Open',
+              web_app: { url: webAppUrl },
+            },
+          }),
+        }).catch(() => {});
+        webhookMessage = `Telegram Webhook va "Open" Web App tugmasi ulandi: ${webhookUrl}`;
       } else {
         webhookOk = false;
         webhookMessage = `Telegram xatosi: ${tgData.description || "Token noto'g'ri"}`;

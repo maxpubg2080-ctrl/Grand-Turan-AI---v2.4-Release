@@ -13,7 +13,11 @@ import {
   resolvePassengerTitle,
 } from './mrzParser';
 import { generatePrestigeWorkbook, generateFlyKhivaWorkbook } from './excelGenerator';
-import { collectProviderKeys } from './aiProviders';
+import {
+  collectProviderKeys,
+  rotateProviderKeys,
+  interleaveProviderQueues,
+} from './aiProviders';
 import { PassportRecord } from '../types/passport';
 
 test('formatUzbekDate formats day, month, and year correctly', () => {
@@ -307,4 +311,32 @@ test('collectProviderKeys gathers 3 keys per provider (12 total) and skips place
   assert.equal(sambanova.length, 3);
   assert.equal(gemini.length + groq.length + openrouter.length + github.length + sambanova.length, 15);
 });
+
+test('rotateProviderKeys spreads consecutive requests across all keys without mutating input', () => {
+  const keys = ['k1', 'k2', 'k3'];
+  assert.deepEqual(rotateProviderKeys(keys, 0), ['k1', 'k2', 'k3']);
+  assert.deepEqual(rotateProviderKeys(keys, 1), ['k2', 'k3', 'k1']);
+  assert.deepEqual(rotateProviderKeys(keys, 2), ['k3', 'k1', 'k2']);
+  assert.deepEqual(rotateProviderKeys(keys, 3), ['k1', 'k2', 'k3']);
+  assert.deepEqual(keys, ['k1', 'k2', 'k3']);
+  assert.deepEqual(rotateProviderKeys([], 2), []);
+});
+
+test('interleaveProviderQueues prioritizes 1 attempt per fast provider before repeating slow fallbacks', () => {
+  const ordered = interleaveProviderQueues([
+    ['gemini-1', 'gemini-2', 'gemini-3'],
+    ['groq-1', 'groq-2'],
+    ['github-1'],
+    [],
+  ]);
+  assert.deepEqual(ordered, [
+    'gemini-1',
+    'groq-1',
+    'github-1',
+    'gemini-2',
+    'groq-2',
+    'gemini-3',
+  ]);
+});
+
 

@@ -59,6 +59,8 @@ export const AdminModal: React.FC<AdminModalProps> = ({
   }, [initialUnlocked, isOpen]);
 
   const [stats, setStats] = useState<AdminSystemStats | null>(null);
+  const [statsLoading, setStatsLoading] = useState(true);
+  const [statsError, setStatsError] = useState<string | null>(null);
   const [botToken, setBotToken] = useState('');
   const [deployHookUrl, setDeployHookUrl] = useState('');
   const [deploying, setDeploying] = useState(false);
@@ -71,20 +73,35 @@ export const AdminModal: React.FC<AdminModalProps> = ({
       ? `${window.location.origin}/api/telegram/webhook`
       : 'https://<RENDER_HOST>/api/telegram/webhook';
 
-  const fetchStats = async () => {
+  const fetchStats = async (showSpinner = false) => {
+    if (showSpinner) setStatsLoading(true);
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 10_000);
     try {
-      const res = await fetch('/api/admin/status');
+      const res = await fetch('/api/admin/status', { signal: controller.signal });
+      if (!res.ok) {
+        throw new Error(`HTTP ${res.status}`);
+      }
       const data = await res.json();
       setStats(data);
-    } catch (err) {
+      setStatsError(null);
+    } catch (err: any) {
       console.error('Failed to fetch admin stats:', err);
+      setStatsError(
+        err?.name === 'AbortError'
+          ? "Server javobi kechikdi (Render uyg'onmoqda bo'lishi mumkin)"
+          : "Serverga ulanib bo'lmadi — qayta tekshiring"
+      );
+    } finally {
+      clearTimeout(timer);
+      setStatsLoading(false);
     }
   };
 
   useEffect(() => {
     if (isOpen && isUnlocked) {
-      fetchStats();
-      const interval = setInterval(fetchStats, 5000);
+      fetchStats(true);
+      const interval = setInterval(() => fetchStats(false), 5000);
       return () => clearInterval(interval);
     }
   }, [isOpen, isUnlocked]);
@@ -313,24 +330,40 @@ export const AdminModal: React.FC<AdminModalProps> = ({
                       Server Uptime
                     </span>
                     <p className="text-xl sm:text-2xl font-black text-indigo-500 mt-1">
-                      {stats?.uptimeSeconds ?? 0}s
+                      {stats ? `${stats.uptimeSeconds}s` : statsLoading ? '...' : '—'}
                     </p>
                   </div>
                 </div>
 
                 {/* Render & GitHub Updater Section */}
                 <div className="p-5 rounded-2xl bg-slate-50 dark:bg-slate-800/40 border border-slate-200 dark:border-slate-700 space-y-4">
-                  <div className="flex items-center justify-between">
+                  <div className="flex items-center justify-between gap-2">
                     <div className="flex items-center gap-2">
                       <Server className="w-5 h-5 text-amber-500" />
                       <h3 className="text-sm font-bold text-slate-900 dark:text-white">
                         Render Deploy & Webhook Sozlamalari
                       </h3>
                     </div>
-                    <span className="text-xs text-emerald-600 dark:text-emerald-400 font-semibold flex items-center gap-1">
-                      <Radio className="w-3.5 h-3.5 animate-pulse" />
-                      Jonli aloqa
-                    </span>
+                    {statsError && !stats ? (
+                      <button
+                        type="button"
+                        onClick={() => fetchStats(true)}
+                        className="text-xs text-rose-600 dark:text-rose-400 font-semibold flex items-center gap-1 hover:underline cursor-pointer"
+                      >
+                        <RefreshCw className={`w-3.5 h-3.5 ${statsLoading ? 'animate-spin' : ''}`} />
+                        Aloqa uzildi (Qayta urinish)
+                      </button>
+                    ) : !stats && statsLoading ? (
+                      <span className="text-xs text-amber-600 dark:text-amber-400 font-semibold flex items-center gap-1">
+                        <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                        Ulanmoqda...
+                      </span>
+                    ) : (
+                      <span className="text-xs text-emerald-600 dark:text-emerald-400 font-semibold flex items-center gap-1">
+                        <Radio className="w-3.5 h-3.5 animate-pulse" />
+                        Jonli aloqa
+                      </span>
+                    )}
                   </div>
 
                   <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
@@ -447,22 +480,36 @@ export const AdminModal: React.FC<AdminModalProps> = ({
 
                     {/* Server-side Multi-AI Cascade Status (Configured via Environment Secrets) */}
                     <div className="p-4 rounded-xl bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 space-y-2 md:col-span-2">
-                      <div className="flex items-center justify-between">
+                      <div className="flex flex-wrap items-center justify-between gap-2">
                         <span className="text-xs font-bold text-slate-800 dark:text-slate-200 flex items-center gap-1.5">
                           <Cpu className="w-4 h-4 text-amber-500" />
                           Multi-AI Zaxira Kaskadi (Avtomatik O'tish)
                         </span>
-                        <span
-                          className={`text-[10px] font-bold px-2.5 py-0.5 rounded-full ${
-                            stats?.aiEngineStatus === 'active'
-                              ? 'bg-emerald-500/15 text-emerald-600 dark:text-emerald-400 border border-emerald-500/30'
-                              : 'bg-rose-500/15 text-rose-600 dark:text-rose-400 border border-rose-500/30'
-                          }`}
-                        >
-                          {stats?.aiEngineStatus === 'active'
-                            ? '● Server Dvigatellari Faol'
-                            : '○ AI Kaliti Sozlanmagan'}
-                        </span>
+                        {!stats && statsLoading ? (
+                          <span className="text-[10px] font-bold px-2.5 py-0.5 rounded-full bg-amber-500/15 text-amber-600 dark:text-amber-400 border border-amber-500/30">
+                            ⏳ Server tekshirilmoqda...
+                          </span>
+                        ) : !stats && statsError ? (
+                          <button
+                            type="button"
+                            onClick={() => fetchStats(true)}
+                            className="text-[10px] font-bold px-2.5 py-0.5 rounded-full bg-amber-500/15 text-amber-600 dark:text-amber-300 border border-amber-500/30 hover:bg-amber-500/25 cursor-pointer"
+                          >
+                            ⚠️ {statsError} — Qayta tekshirish
+                          </button>
+                        ) : (
+                          <span
+                            className={`text-[10px] font-bold px-2.5 py-0.5 rounded-full ${
+                              stats?.aiEngineStatus === 'active'
+                                ? 'bg-emerald-500/15 text-emerald-600 dark:text-emerald-400 border border-emerald-500/30'
+                                : 'bg-rose-500/15 text-rose-600 dark:text-rose-400 border border-rose-500/30'
+                            }`}
+                          >
+                            {stats?.aiEngineStatus === 'active'
+                              ? '● Server Dvigatellari Faol'
+                              : '○ AI Kaliti Sozlanmagan'}
+                          </span>
+                        )}
                       </div>
                       {stats?.activeEngines && stats.activeEngines.length > 0 && (
                         <div className="flex flex-wrap gap-1.5 pt-0.5">
@@ -507,13 +554,13 @@ export const AdminModal: React.FC<AdminModalProps> = ({
                   <div className="p-3.5 rounded-xl bg-slate-100 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 flex items-center justify-between">
                     <span className="text-slate-500 dark:text-slate-400">Node Versiyasi</span>
                     <span className="font-mono font-bold text-slate-800 dark:text-slate-200">
-                      {stats?.nodeVersion || 'v22.23.2'}
+                      {stats ? stats.nodeVersion : statsLoading ? '...' : '—'}
                     </span>
                   </div>
                   <div className="p-3.5 rounded-xl bg-slate-100 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 flex items-center justify-between">
                     <span className="text-slate-500 dark:text-slate-400">Xotira sarfi</span>
                     <span className="font-mono font-bold text-slate-800 dark:text-slate-200">
-                      {stats?.memoryUsageMb || 45} MB
+                      {stats ? `${stats.memoryUsageMb} MB` : statsLoading ? '...' : '—'}
                     </span>
                   </div>
                   <div className="p-3.5 rounded-xl bg-slate-100 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 flex items-center justify-between">
