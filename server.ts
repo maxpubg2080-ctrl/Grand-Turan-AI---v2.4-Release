@@ -26,6 +26,13 @@ import {
   interleaveProviderQueues,
   extractJsonObjectString,
   summarizeProviderErrors,
+  selectGeminiVisionModels,
+  selectOpenRouterFreeVisionModels,
+  selectGroqVisionModels,
+  selectSambaNovaVisionModels,
+  selectMistralVisionModels,
+  GeminiCatalogModel,
+  OpenAiCatalogModel,
 } from './src/utils/aiProviders.ts';
 import { PassportRecord, FlightDetails } from './src/types/passport.ts';
 
@@ -89,14 +96,13 @@ function getActiveEngineLabels(): string[] {
   const labels: string[] = [];
   const geminiKeys = getGeminiKeys();
   if (geminiKeys.length > 0) {
-    labels.push(`Gemini (${geminiKeys.length} kalit • 4 model)`);
+    labels.push(`Gemini (${geminiKeys.length} kalit • Auto-Vision)`);
   }
   const ext = getExternalProviderKeys();
   if (ext.groq.length > 0) labels.push(`Groq Vision (${ext.groq.length} kalit)`);
-  if (ext.github.length > 0) labels.push(`GitHub Models (${ext.github.length} kalit)`);
   if (ext.openrouter.length > 0) labels.push(`OpenRouter :free (${ext.openrouter.length} kalit)`);
-  if (ext.sambanova.length > 0) labels.push(`SambaNova Vision (${ext.sambanova.length} kalit)`);
-  if (ext.mistral.length > 0) labels.push(`Mistral Pixtral (${ext.mistral.length} kalit)`);
+  if (ext.sambanova.length > 0) labels.push(`SambaNova Gemma-4 (${ext.sambanova.length} kalit)`);
+  if (ext.mistral.length > 0) labels.push(`Mistral Vision (${ext.mistral.length} kalit)`);
   labels.push('Offline MRZ Checksum');
   return labels;
 }
@@ -138,6 +144,46 @@ function isSlotOnCooldown(slotId: string): boolean {
 
 function markSlotCooldown(slotId: string, ms: number) {
   providerCooldowns.set(slotId, Date.now() + ms);
+}
+
+// 30-minute cached live model discovery per provider/key so deprecated 404 slugs never break OCR
+const modelCatalogCache = new Map<string, { models: string[]; expiresAt: number }>();
+
+async function getCachedDiscoveredModels(
+  cacheKey: string,
+  fetcher: () => Promise<string[]>,
+  fallbackModels: string[]
+): Promise<string[]> {
+  const cached = modelCatalogCache.get(cacheKey);
+  if (cached && Date.now() < cached.expiresAt && cached.models.length > 0) {
+    return cached.models;
+  }
+  try {
+    const discovered = await fetcher();
+    const resolved = discovered.length > 0 ? discovered : fallbackModels;
+    modelCatalogCache.set(cacheKey, {
+      models: resolved,
+      expiresAt: Date.now() + 30 * 60_000,
+    });
+    return resolved;
+  } catch {
+    return fallbackModels;
+  }
+}
+
+async function fetchJsonWithTimeout(url: string, headers: Record<string, string> = {}, timeoutMs = 2_500): Promise<any> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const res = await fetch(url, { headers, signal: controller.signal });
+    if (!res.ok) return null;
+    const text = await res.text();
+    return JSON.parse(text);
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 function cleanJsonResponse(text: string): string {
@@ -317,12 +363,16 @@ async function callGeminiModel(
     },
   });
 
+  const isGemma = /^gemma-/i.test(modelName);
   const controller = new AbortController();
   const config: Record<string, any> = {
     abortSignal: controller.signal,
-    systemInstruction: OCR_SYSTEM_PROMPT,
-    responseMimeType: 'application/json',
-    responseSchema: {
+  };
+
+  if (!isGemma) {
+    config.systemInstruction = OCR_SYSTEM_PROMPT;
+    config.responseMimeType = 'application/json';
+    config.responseSchema = {
       type: Type.OBJECT,
       properties: {
         errorReason: { type: Type.STRING },
@@ -342,18 +392,18 @@ async function callGeminiModel(
         rawMrz: { type: Type.STRING },
       },
       required: ['surname', 'givenNames', 'series', 'number'],
-    },
-  };
+    };
+  }
 
   if (modelName === 'gemini-4-hydrogen') {
     config.thinkingConfig = {
       thinkingLevel: useThinking ? ThinkingLevel.MEDIUM : ThinkingLevel.LOW,
     };
-  } else if (modelName === 'gemini-2.5-flash' && !useThinking) {
-    config.thinkingConfig = {
-      thinkingBudget: 0,
-    };
   }
+
+  const promptText = isGemma
+    ? `${OCR_SYSTEM_PROMPT}\n\n${OPENAI_VISION_USER_PROMPT}`
+    : 'Transcribe the exact passport details and MRZ from this image into JSON. Do not include patronymic. Do not invent any data.';
 
   const response = await withTimeout(
     client.models.generateContent({
@@ -367,7 +417,7 @@ async function callGeminiModel(
             },
           },
           {
-            text: 'Transcribe the exact passport details and MRZ from this image into JSON. Do not include patronymic. Do not invent any data.',
+            text: promptText,
           },
         ],
       },
@@ -422,14 +472,21 @@ async function callOpenAiCompatibleVision(
       }),
     });
 
+    const rawText = await res.text().catch(() => '');
     if (!res.ok) {
-      const errBody = await res.text().catch(() => '');
-      const err: any = new Error(`HTTP ${res.status}: ${errBody || res.statusText}`);
+      const err: any = new Error(`HTTP ${res.status}: ${rawText || res.statusText}`);
       err.status = res.status;
       throw err;
     }
 
-    const json = await res.json();
+    let json: any;
+    try {
+      json = JSON.parse(rawText);
+    } catch {
+      const err: any = new Error(`HTTP ${res.status} JSON o'rniga matn qaytardi: ${rawText.slice(0, 80)}`);
+      err.isNonJsonEndpoint = true;
+      throw err;
+    }
     return String(json?.choices?.[0]?.message?.content || '');
   } catch (err: any) {
     if (err?.name === 'AbortError' || controller.signal.aborted) {
@@ -452,7 +509,8 @@ function classifyProviderError(err: any) {
   const isDailyLimit =
     isRateLimit &&
     (/perday|daily|rpd|limit:\s*20|quota/i.test(msg) && !/perminute|rpm|retry in \d+s/i.test(msg));
-  const isNotFound = status === 404 || msg.includes('404') || msg.includes('NOT_FOUND');
+  const isNotFound =
+    Boolean(err?.isNonJsonEndpoint) || status === 404 || msg.includes('404') || msg.includes('NOT_FOUND');
   const isAuthError =
     status === 401 || status === 403 || msg.includes('PERMISSION_DENIED') || msg.includes('API_KEY_INVALID');
   return { msg, isTimeout, isRateLimit, isDailyLimit, isNotFound, isAuthError };
@@ -469,13 +527,16 @@ async function parsePassportImage(
   if (
     geminiKeys.length === 0 &&
     extKeys.groq.length === 0 &&
-    extKeys.github.length === 0 &&
     extKeys.openrouter.length === 0 &&
     extKeys.sambanova.length === 0 &&
     extKeys.mistral.length === 0
   ) {
+    const githubOnlyNotice =
+      extKeys.github.length > 0
+        ? " Eslatma: GitHub Models (models.github.ai) 2026-yil iyul oyida yopilgan."
+        : '';
     throw new AppApiError(
-      "Serverda birorta ham AI kaliti sozlanmagan (GEMINI_API_KEY, GROQ_API_KEY, GITHUB_API_KEY, OPENROUTER_API_KEY yoki SAMBANOVA_API_KEY kiriting, yoki Offline MRZ matn rejimidan foydalaning).",
+      `Serverda faol AI kaliti sozlanmagan (GEMINI_API_KEY, GROQ_API_KEY, OPENROUTER_API_KEY, SAMBANOVA_API_KEY yoki MISTRAL_API_KEY kiriting, yoki Offline MRZ matn rejimidan foydalaning).${githubOnlyNotice}`,
       400
     );
   }
@@ -492,17 +553,109 @@ async function parsePassportImage(
   const totalCascadeBudgetMs = 38_000;
   const cascadeStart = Date.now();
 
-  // Build per-provider rotated queues so parallel & sequential calls spread across all keys
-  const geminiQueue: AttemptSpec[] = [];
-  const geminiModels = useThinking
-    ? ['gemini-4-hydrogen', 'gemini-2.5-flash', 'gemini-2.5-flash-lite', 'gemini-3.1-flash-lite']
-    : ['gemini-2.5-flash', 'gemini-2.5-flash-lite', 'gemini-4-hydrogen', 'gemini-3.1-flash-lite'];
+  // Discover live vision models per provider in parallel (cached 30 min so overhead is 0ms on repeat scans)
   const rotatedGeminiKeys = rotateProviderKeys(
     geminiKeys.map((key, idx) => ({ key, idx })),
     cursor
   );
-  for (const model of geminiModels) {
-    for (const { key, idx } of rotatedGeminiKeys) {
+  const rotatedGroqKeys = rotateProviderKeys(
+    extKeys.groq.map((key, idx) => ({ key, idx })),
+    cursor
+  );
+  const rotatedOpenRouterKeys = rotateProviderKeys(
+    extKeys.openrouter.map((key, idx) => ({ key, idx })),
+    cursor
+  );
+  const rotatedSambaKeys = rotateProviderKeys(
+    extKeys.sambanova.map((key, idx) => ({ key, idx })),
+    cursor
+  );
+  const rotatedMistralKeys = rotateProviderKeys(
+    extKeys.mistral.map((key, idx) => ({ key, idx })),
+    cursor
+  );
+
+  const [geminiModelsPerKey, groqModels, openrouterModels, sambaModels, mistralModels] = await Promise.all([
+    Promise.all(
+      rotatedGeminiKeys.map(({ key, idx }) =>
+        getCachedDiscoveredModels(
+          `gemini:${idx}:${useThinking ? 'think' : 'fast'}`,
+          async () => {
+            const data = await fetchJsonWithTimeout(
+              `https://generativelanguage.googleapis.com/v1beta/models?key=${encodeURIComponent(key)}`
+            );
+            const list: GeminiCatalogModel[] = Array.isArray(data?.models) ? data.models : [];
+            return selectGeminiVisionModels(list, { useThinking, maxModels: 4 });
+          },
+          ['gemini-4-hydrogen', 'gemini-3.1-flash-lite']
+        )
+      )
+    ),
+    rotatedGroqKeys.length > 0
+      ? getCachedDiscoveredModels(
+          'groq',
+          async () => {
+            const data = await fetchJsonWithTimeout('https://api.groq.com/openai/v1/models', {
+              Authorization: `Bearer ${rotatedGroqKeys[0].key}`,
+            });
+            const list: OpenAiCatalogModel[] = Array.isArray(data?.data) ? data.data : [];
+            return selectGroqVisionModels(list, 3);
+          },
+          ['qwen/qwen3.8-27b', 'meta-models/muse-spark-open']
+        )
+      : Promise.resolve([]),
+    rotatedOpenRouterKeys.length > 0
+      ? getCachedDiscoveredModels(
+          'openrouter',
+          async () => {
+            const data = await fetchJsonWithTimeout('https://openrouter.ai/api/v1/models');
+            const list: OpenAiCatalogModel[] = Array.isArray(data?.data) ? data.data : [];
+            return selectOpenRouterFreeVisionModels(list, 5);
+          },
+          [
+            'google/gemma-4-31b-it:free',
+            'google/gemma-4-26b-a4b-it:free',
+            'nvidia/nemotron-3.5-super-vl:free',
+            'openrouter/free',
+          ]
+        )
+      : Promise.resolve([]),
+    rotatedSambaKeys.length > 0
+      ? getCachedDiscoveredModels(
+          'sambanova',
+          async () => {
+            const data = await fetchJsonWithTimeout('https://api.sambanova.ai/v1/models', {
+              Authorization: `Bearer ${rotatedSambaKeys[0].key}`,
+            });
+            const list: OpenAiCatalogModel[] = Array.isArray(data?.data) ? data.data : [];
+            return selectSambaNovaVisionModels(list, 3);
+          },
+          ['gemma-4-31B-it']
+        )
+      : Promise.resolve([]),
+    rotatedMistralKeys.length > 0
+      ? getCachedDiscoveredModels(
+          'mistral',
+          async () => {
+            const data = await fetchJsonWithTimeout('https://api.mistral.ai/v1/models', {
+              Authorization: `Bearer ${rotatedMistralKeys[0].key}`,
+            });
+            const list: OpenAiCatalogModel[] = Array.isArray(data?.data) ? data.data : [];
+            return selectMistralVisionModels(list, 3);
+          },
+          ['mistral-small-latest', 'mistral-medium-latest', 'pixtral-12b-2409']
+        )
+      : Promise.resolve([]),
+  ]);
+
+  // Build per-provider rotated queues so parallel & sequential calls spread across all keys
+  const geminiQueue: AttemptSpec[] = [];
+  const maxGeminiDepth = geminiModelsPerKey.reduce((max, arr) => Math.max(max, arr.length), 0);
+  for (let mIdx = 0; mIdx < maxGeminiDepth; mIdx++) {
+    for (let kPos = 0; kPos < rotatedGeminiKeys.length; kPos++) {
+      const model = geminiModelsPerKey[kPos]?.[mIdx];
+      if (!model) continue;
+      const { key, idx } = rotatedGeminiKeys[kPos];
       const suffix = geminiKeys.length > 1 ? `#${idx + 1}` : '';
       geminiQueue.push({
         id: `gemini:${model}:${idx}`,
@@ -514,11 +667,7 @@ async function parsePassportImage(
   }
 
   const groqQueue: AttemptSpec[] = [];
-  const rotatedGroqKeys = rotateProviderKeys(
-    extKeys.groq.map((key, idx) => ({ key, idx })),
-    cursor
-  );
-  for (const model of ['meta-llama/llama-4-scout-17b-16e-instruct', 'meta-llama/llama-4-maverick-17b-16e-instruct']) {
+  for (const model of groqModels) {
     for (const { key, idx } of rotatedGroqKeys) {
       const suffix = extKeys.groq.length > 1 ? `#${idx + 1}` : '';
       groqQueue.push({
@@ -539,38 +688,8 @@ async function parsePassportImage(
     }
   }
 
-  const githubQueue: AttemptSpec[] = [];
-  const rotatedGithubKeys = rotateProviderKeys(
-    extKeys.github.map((key, idx) => ({ key, idx })),
-    cursor
-  );
-  for (const model of ['openai/gpt-4o-mini', 'meta/llama-3.2-90b-vision-instruct']) {
-    for (const { key, idx } of rotatedGithubKeys) {
-      const suffix = extKeys.github.length > 1 ? `#${idx + 1}` : '';
-      githubQueue.push({
-        id: `github:${model}:${idx}`,
-        provider: 'GitHub',
-        label: `github:${model.split('/').pop()}${suffix}`,
-        run: () =>
-          callOpenAiCompatibleVision(
-            'https://models.github.ai/inference/chat/completions',
-            key,
-            model,
-            cleanBase64,
-            mimeType,
-            {},
-            attemptTimeoutMs
-          ),
-      });
-    }
-  }
-
   const sambanovaQueue: AttemptSpec[] = [];
-  const rotatedSambaKeys = rotateProviderKeys(
-    extKeys.sambanova.map((key, idx) => ({ key, idx })),
-    cursor
-  );
-  for (const model of ['Llama-4-Maverick-17B-128E-Instruct', 'Llama-3.2-90B-Vision-Instruct', 'Llama-3.2-11B-Vision-Instruct']) {
+  for (const model of sambaModels) {
     for (const { key, idx } of rotatedSambaKeys) {
       const suffix = extKeys.sambanova.length > 1 ? `#${idx + 1}` : '';
       sambanovaQueue.push({
@@ -592,11 +711,7 @@ async function parsePassportImage(
   }
 
   const openrouterQueue: AttemptSpec[] = [];
-  const rotatedOpenRouterKeys = rotateProviderKeys(
-    extKeys.openrouter.map((key, idx) => ({ key, idx })),
-    cursor
-  );
-  for (const model of ['google/gemma-3-27b-it:free', 'qwen/qwen2.5-vl-72b-instruct:free', 'openrouter/free']) {
+  for (const model of openrouterModels) {
     for (const { key, idx } of rotatedOpenRouterKeys) {
       const suffix = extKeys.openrouter.length > 1 ? `#${idx + 1}` : '';
       openrouterQueue.push({
@@ -618,34 +733,31 @@ async function parsePassportImage(
   }
 
   const mistralQueue: AttemptSpec[] = [];
-  const rotatedMistralKeys = rotateProviderKeys(
-    extKeys.mistral.map((key, idx) => ({ key, idx })),
-    cursor
-  );
-  for (const { key, idx } of rotatedMistralKeys) {
-    const suffix = extKeys.mistral.length > 1 ? `#${idx + 1}` : '';
-    mistralQueue.push({
-      id: `mistral:pixtral-12b-2409:${idx}`,
-      provider: 'Mistral',
-      label: `mistral:pixtral-12b${suffix}`,
-      run: () =>
-        callOpenAiCompatibleVision(
-          'https://api.mistral.ai/v1/chat/completions',
-          key,
-          'pixtral-12b-2409',
-          cleanBase64,
-          mimeType,
-          {},
-          attemptTimeoutMs
-        ),
-    });
+  for (const model of mistralModels) {
+    for (const { key, idx } of rotatedMistralKeys) {
+      const suffix = extKeys.mistral.length > 1 ? `#${idx + 1}` : '';
+      mistralQueue.push({
+        id: `mistral:${model}:${idx}`,
+        provider: 'Mistral',
+        label: `mistral:${model}${suffix}`,
+        run: () =>
+          callOpenAiCompatibleVision(
+            'https://api.mistral.ai/v1/chat/completions',
+            key,
+            model,
+            cleanBase64,
+            mimeType,
+            {},
+            attemptTimeoutMs
+          ),
+      });
+    }
   }
 
   // Interleave fast providers round-by-round so one slow/blocked provider never stalls the rest
   const attempts = interleaveProviderQueues([
     geminiQueue,
     groqQueue,
-    githubQueue,
     sambanovaQueue,
     openrouterQueue,
     mistralQueue,
@@ -935,18 +1047,20 @@ app.post('/api/zip', async (req: Request, res: Response) => {
 // ---------------------------------------------------------------------------
 app.get('/api/project-zip', async (req: Request, res: Response) => {
   try {
-    const prebuiltZip = path.resolve(__dirname, 'public', 'Grand_Turan_AI_Full_Project_Source.zip');
+    const archiveName = 'Grand_Turan_AI_v2.6_MultiVision.zip';
+    const prebuiltZip = path.resolve(__dirname, 'public', archiveName);
     if (fs.existsSync(prebuiltZip)) {
       const stat = fs.statSync(prebuiltZip);
       res.setHeader('Content-Type', 'application/zip');
       res.setHeader('Content-Length', stat.size);
-      res.setHeader('Content-Disposition', 'attachment; filename="Grand_Turan_AI_Full_Project_Source.zip"');
+      res.setHeader('Content-Disposition', `attachment; filename="${archiveName}"`);
       res.sendFile(prebuiltZip);
       return;
     }
 
     const zip = new JSZip();
-    await addDirectoryToZip(zip, path.resolve(__dirname), path.resolve(__dirname));
+    const innerFolder = zip.folder('Grand-Turan-AI-v2.6') || zip;
+    await addDirectoryToZip(innerFolder, path.resolve(__dirname), path.resolve(__dirname));
     const zipContent = await zip.generateAsync({
       type: 'nodebuffer',
       compression: 'DEFLATE',
@@ -954,7 +1068,7 @@ app.get('/api/project-zip', async (req: Request, res: Response) => {
     });
     res.setHeader('Content-Type', 'application/zip');
     res.setHeader('Content-Length', zipContent.length);
-    res.setHeader('Content-Disposition', 'attachment; filename="Grand_Turan_AI_Full_Project_Source.zip"');
+    res.setHeader('Content-Disposition', `attachment; filename="${archiveName}"`);
     res.send(zipContent);
   } catch (error: any) {
     console.error('Error creating project ZIP:', error);
@@ -1260,7 +1374,6 @@ app.get('/api/admin/status', (req: Request, res: Response) => {
   const hasAnyAi = Boolean(
     getEffectiveGeminiKey() ||
       ext.groq.length > 0 ||
-      ext.github.length > 0 ||
       ext.openrouter.length > 0 ||
       ext.sambanova.length > 0 ||
       ext.mistral.length > 0

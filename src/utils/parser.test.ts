@@ -19,6 +19,11 @@ import {
   interleaveProviderQueues,
   extractJsonObjectString,
   summarizeProviderErrors,
+  selectGeminiVisionModels,
+  selectOpenRouterFreeVisionModels,
+  selectGroqVisionModels,
+  selectSambaNovaVisionModels,
+  selectMistralVisionModels,
 } from './aiProviders';
 import { PassportRecord } from '../types/passport';
 
@@ -367,6 +372,68 @@ test('summarizeProviderErrors keeps the first error per provider in concise orde
   assert.equal(
     summary,
     'Gemini: 429 quota exceeded | Groq: 401 invalid api key | GitHub: 403 models permission required'
+  );
+});
+
+test('selectGeminiVisionModels filters deprecated/non-text-gen IDs and prioritizes live flash models', () => {
+  const catalog = [
+    { name: 'models/gemini-2.5-flash', supportedGenerationMethods: ['generateContent'] },
+    { name: 'models/gemini-1.5-pro', supportedGenerationMethods: ['generateContent'] },
+    { name: 'models/gemini-embedding-2', supportedGenerationMethods: ['embedContent'] },
+    { name: 'models/gemini-3.8-flash-tts', supportedGenerationMethods: ['generateContent'] },
+    { name: 'models/gemini-3.5-flash-lite', supportedGenerationMethods: ['generateContent'] },
+    { name: 'models/gemini-3.8-flash', supportedGenerationMethods: ['generateContent'] },
+    { name: 'models/gemma-4-31b-it', supportedGenerationMethods: ['generateContent'] },
+  ];
+
+  const selected = selectGeminiVisionModels(catalog, { useThinking: false, maxModels: 4 });
+  assert.deepEqual(selected, ['gemini-3.8-flash', 'gemini-3.5-flash-lite', 'gemma-4-31b-it']);
+  assert.equal(selectGeminiVisionModels([], { useThinking: false })[0], 'gemini-4-hydrogen');
+});
+
+test('selectOpenRouterFreeVisionModels picks only :free image-capable models plus openrouter/free', () => {
+  const catalog = [
+    { id: 'meta-llama/text-only:free', architecture: { input_modalities: ['text'] } },
+    { id: 'google/gemma-4-31b-it:free', architecture: { input_modalities: ['text', 'image'] } },
+    { id: 'openai/gpt-4o', architecture: { input_modalities: ['text', 'image'] } },
+    { id: 'nvidia/nemotron-3.5-super-vl:free', architecture: { input_modalities: ['text', 'image'] } },
+  ];
+
+  const selected = selectOpenRouterFreeVisionModels(catalog, 4);
+  assert.deepEqual(selected, [
+    'google/gemma-4-31b-it:free',
+    'nvidia/nemotron-3.5-super-vl:free',
+    'openrouter/free',
+  ]);
+});
+
+test('selectGroqVisionModels, selectSambaNovaVisionModels, and selectMistralVisionModels pick active Nov-2026 models', () => {
+  assert.deepEqual(
+    selectGroqVisionModels([
+      { id: 'llama-3.3-70b-versatile', active: true },
+      { id: 'whisper-large-v3', active: true },
+      { id: 'qwen/qwen3.8-27b', active: true },
+      { id: 'meta-models/muse-spark-open', active: true },
+    ]),
+    ['qwen/qwen3.8-27b', 'meta-models/muse-spark-open']
+  );
+
+  assert.deepEqual(
+    selectSambaNovaVisionModels([
+      { id: 'GLM-5.3' },
+      { id: 'Meta-Llama-3.3-70B-Instruct' },
+      { id: 'gemma-4-31B-it' },
+    ]),
+    ['gemma-4-31B-it']
+  );
+
+  assert.deepEqual(
+    selectMistralVisionModels([
+      { id: 'codestral-latest' },
+      { id: 'mistral-small-latest' },
+      { id: 'pixtral-12b-2409' },
+    ]),
+    ['mistral-small-latest', 'pixtral-12b-2409']
   );
 });
 

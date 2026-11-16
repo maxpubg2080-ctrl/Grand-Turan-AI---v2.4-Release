@@ -22,7 +22,7 @@ export async function downloadProjectSourceZip(): Promise<boolean> {
     const link = document.createElement('a');
     link.style.display = 'none';
     link.href = blobUrl;
-    link.download = 'Grand_Turan_AI_Full_Project_Source.zip';
+    link.download = 'Grand_Turan_AI_v2.6_MultiVision.zip';
     document.body.appendChild(link);
     link.click();
 

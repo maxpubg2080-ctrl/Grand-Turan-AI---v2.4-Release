@@ -322,9 +322,9 @@ export const TelegramChatStream: React.FC<TelegramChatStreamProps> = ({
           `Quyidagi tugma orqali to'liq arxivni yuklab oling:`,
         time,
         fileAttachment: {
-          name: `Grand_Turan_AI_Full_Project_Source.zip`,
+          name: `Grand_Turan_AI_v2.6_MultiVision.zip`,
           type: 'zip',
-          size: `185 KB`,
+          size: `195 KB`,
           downloadUrl: '/api/project-zip',
           recordsCount: passports.length,
         },
