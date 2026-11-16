@@ -24,6 +24,8 @@ import {
   collectProviderKeys,
   rotateProviderKeys,
   interleaveProviderQueues,
+  extractJsonObjectString,
+  summarizeProviderErrors,
 } from './src/utils/aiProviders.ts';
 import { PassportRecord, FlightDetails } from './src/types/passport.ts';
 
@@ -87,7 +89,7 @@ function getActiveEngineLabels(): string[] {
   const labels: string[] = [];
   const geminiKeys = getGeminiKeys();
   if (geminiKeys.length > 0) {
-    labels.push(`Gemini (${geminiKeys.length} kalit • 3 model)`);
+    labels.push(`Gemini (${geminiKeys.length} kalit • 4 model)`);
   }
   const ext = getExternalProviderKeys();
   if (ext.groq.length > 0) labels.push(`Groq Vision (${ext.groq.length} kalit)`);
@@ -139,9 +141,7 @@ function markSlotCooldown(slotId: string, ms: number) {
 }
 
 function cleanJsonResponse(text: string): string {
-  const trimmed = (text || '').trim();
-  const fenced = trimmed.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/i);
-  return fenced ? fenced[1].trim() : trimmed;
+  return extractJsonObjectString(text);
 }
 
 const OCR_SYSTEM_PROMPT = `You are a strict, 100% truthful passport data extraction OCR engine.
@@ -308,6 +308,9 @@ async function callGeminiModel(
   const client = new GoogleGenAI({
     apiKey,
     httpOptions: {
+      retryOptions: {
+        attempts: 1,
+      },
       headers: {
         'User-Agent': 'aistudio-build',
       },
@@ -385,10 +388,11 @@ async function callOpenAiCompatibleVision(
   cleanBase64: string,
   mimeType: string,
   extraHeaders: Record<string, string> = {},
-  timeoutMs: number = 12_000
+  timeoutMs: number = 10_000
 ): Promise<string> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
+  const combinedPrompt = `${OCR_SYSTEM_PROMPT}\n\n${OPENAI_VISION_USER_PROMPT}`;
 
   try {
     const res = await fetch(endpoint, {
@@ -404,11 +408,10 @@ async function callOpenAiCompatibleVision(
         temperature: 0.1,
         max_tokens: 900,
         messages: [
-          { role: 'system', content: OCR_SYSTEM_PROMPT },
           {
             role: 'user',
             content: [
-              { type: 'text', text: OPENAI_VISION_USER_PROMPT },
+              { type: 'text', text: combinedPrompt },
               {
                 type: 'image_url',
                 image_url: { url: `data:${mimeType};base64,${cleanBase64}` },
@@ -479,20 +482,21 @@ async function parsePassportImage(
 
   type AttemptSpec = {
     id: string;
+    provider: string;
     label: string;
     run: () => Promise<string>;
   };
 
   const cursor = keyRotationCursor++;
-  const attemptTimeoutMs = useThinking ? 16_000 : 12_000;
+  const attemptTimeoutMs = useThinking ? 14_000 : 9_500;
   const totalCascadeBudgetMs = 38_000;
   const cascadeStart = Date.now();
 
   // Build per-provider rotated queues so parallel & sequential calls spread across all keys
   const geminiQueue: AttemptSpec[] = [];
   const geminiModels = useThinking
-    ? ['gemini-4-hydrogen', 'gemini-2.5-flash', 'gemini-3.1-flash-lite']
-    : ['gemini-2.5-flash', 'gemini-4-hydrogen', 'gemini-3.1-flash-lite'];
+    ? ['gemini-4-hydrogen', 'gemini-2.5-flash', 'gemini-2.5-flash-lite', 'gemini-3.1-flash-lite']
+    : ['gemini-2.5-flash', 'gemini-2.5-flash-lite', 'gemini-4-hydrogen', 'gemini-3.1-flash-lite'];
   const rotatedGeminiKeys = rotateProviderKeys(
     geminiKeys.map((key, idx) => ({ key, idx })),
     cursor
@@ -502,6 +506,7 @@ async function parsePassportImage(
       const suffix = geminiKeys.length > 1 ? `#${idx + 1}` : '';
       geminiQueue.push({
         id: `gemini:${model}:${idx}`,
+        provider: 'Gemini',
         label: `${model}${suffix}`,
         run: () => callGeminiModel(key, model, cleanBase64, mimeType, useThinking, attemptTimeoutMs),
       });
@@ -518,6 +523,7 @@ async function parsePassportImage(
       const suffix = extKeys.groq.length > 1 ? `#${idx + 1}` : '';
       groqQueue.push({
         id: `groq:${model}:${idx}`,
+        provider: 'Groq',
         label: `groq:${model.split('/').pop()}${suffix}`,
         run: () =>
           callOpenAiCompatibleVision(
@@ -543,6 +549,7 @@ async function parsePassportImage(
       const suffix = extKeys.github.length > 1 ? `#${idx + 1}` : '';
       githubQueue.push({
         id: `github:${model}:${idx}`,
+        provider: 'GitHub',
         label: `github:${model.split('/').pop()}${suffix}`,
         run: () =>
           callOpenAiCompatibleVision(
@@ -563,11 +570,12 @@ async function parsePassportImage(
     extKeys.sambanova.map((key, idx) => ({ key, idx })),
     cursor
   );
-  for (const model of ['Llama-3.2-90B-Vision-Instruct', 'Llama-3.2-11B-Vision-Instruct']) {
+  for (const model of ['Llama-4-Maverick-17B-128E-Instruct', 'Llama-3.2-90B-Vision-Instruct', 'Llama-3.2-11B-Vision-Instruct']) {
     for (const { key, idx } of rotatedSambaKeys) {
       const suffix = extKeys.sambanova.length > 1 ? `#${idx + 1}` : '';
       sambanovaQueue.push({
         id: `sambanova:${model}:${idx}`,
+        provider: 'SambaNova',
         label: `sambanova:${model}${suffix}`,
         run: () =>
           callOpenAiCompatibleVision(
@@ -593,6 +601,7 @@ async function parsePassportImage(
       const suffix = extKeys.openrouter.length > 1 ? `#${idx + 1}` : '';
       openrouterQueue.push({
         id: `openrouter:${model}:${idx}`,
+        provider: 'OpenRouter',
         label: `openrouter:${model.split('/').pop()}${suffix}`,
         run: () =>
           callOpenAiCompatibleVision(
@@ -617,6 +626,7 @@ async function parsePassportImage(
     const suffix = extKeys.mistral.length > 1 ? `#${idx + 1}` : '';
     mistralQueue.push({
       id: `mistral:pixtral-12b-2409:${idx}`,
+      provider: 'Mistral',
       label: `mistral:pixtral-12b${suffix}`,
       run: () =>
         callOpenAiCompatibleVision(
@@ -642,6 +652,7 @@ async function parsePassportImage(
   ]);
 
   let lastErrorMsg = '';
+  const failureSamples: Array<{ provider: string; detail: string }> = [];
   const rpmPausedCandidates: AttemptSpec[] = [];
   let sawOnlyAuthErrors = true;
   const triedLabels: string[] = [];
@@ -662,7 +673,9 @@ async function parsePassportImage(
         parsedJson = JSON.parse(cleanJsonResponse(responseText) || '{}');
       } catch {
         // Non-JSON answer from fallback model; try next candidate
-        lastErrorMsg = `${candidate.label}: JSON javob qaytarmadi`;
+        const detail = 'JSON javob qaytarmadi';
+        lastErrorMsg = `${candidate.label}: ${detail}`;
+        failureSamples.push({ provider: candidate.provider, detail });
         sawOnlyAuthErrors = false;
         continue;
       }
@@ -676,6 +689,7 @@ async function parsePassportImage(
       }
       const { msg, isTimeout, isRateLimit, isDailyLimit, isNotFound, isAuthError } = classifyProviderError(err);
       lastErrorMsg = `${candidate.label}: ${msg}`;
+      failureSamples.push({ provider: candidate.provider, detail: msg });
 
       if (!isAuthError) {
         sawOnlyAuthErrors = false;
@@ -722,15 +736,17 @@ async function parsePassportImage(
     );
   }
 
+  const summary = summarizeProviderErrors(failureSamples) || lastErrorMsg;
+
   if (sawOnlyAuthErrors) {
     throw new AppApiError(
-      `AI API kaliti noto'g'ri yoki ruxsat yo'q. Server Environment kalitlarini tekshiring. (${lastErrorMsg})`,
+      `AI API kaliti noto'g'ri yoki ruxsat yo'q. Server Environment kalitlarini tekshiring. (${summary})`,
       403
     );
   }
 
   throw new AppApiError(
-    `AI limit yoki tarmoq xatosi (${triedLabels.length} ta model sinab ko'rildi): ${lastErrorMsg}`,
+    `AI limit yoki tarmoq xatosi (${triedLabels.length} ta urinish): ${summary}`,
     502
   );
 }

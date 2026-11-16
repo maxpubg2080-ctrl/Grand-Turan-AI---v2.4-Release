@@ -73,3 +73,69 @@ export function interleaveProviderQueues<T>(queues: ReadonlyArray<readonly T[]>)
   return result;
 }
 
+/**
+ * Extracts the first balanced JSON object `{...}` from a model response,
+ * handling markdown code fences and surrounding prose cleanly.
+ */
+export function extractJsonObjectString(rawText: string): string {
+  const trimmed = (rawText || '').trim();
+  if (!trimmed) return '';
+
+  // Strip code fences if present anywhere
+  const fenceMatch = trimmed.match(/```(?:json)?\s*([\s\S]*?)\s*```/i);
+  const candidate = fenceMatch ? fenceMatch[1].trim() : trimmed;
+
+  const start = candidate.indexOf('{');
+  if (start === -1) return candidate;
+
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+
+  for (let i = start; i < candidate.length; i++) {
+    const ch = candidate[i];
+    if (inString) {
+      if (escaped) {
+        escaped = false;
+      } else if (ch === '\\') {
+        escaped = true;
+      } else if (ch === '"') {
+        inString = false;
+      }
+      continue;
+    }
+
+    if (ch === '"') {
+      inString = true;
+    } else if (ch === '{') {
+      depth++;
+    } else if (ch === '}') {
+      depth--;
+      if (depth === 0) {
+        return candidate.slice(start, i + 1);
+      }
+    }
+  }
+
+  return candidate.slice(start);
+}
+
+/**
+ * Collapses a list of "(providerLabel, shortError)" failures into a concise
+ * per-provider diagnostic summary so one trailing timeout never hides earlier errors.
+ */
+export function summarizeProviderErrors(
+  failures: ReadonlyArray<{ provider: string; detail: string }>
+): string {
+  const seen = new Map<string, string>();
+  for (const item of failures) {
+    if (!seen.has(item.provider)) {
+      seen.set(item.provider, item.detail.slice(0, 120));
+    }
+  }
+  return Array.from(seen.entries())
+    .map(([provider, detail]) => `${provider}: ${detail}`)
+    .join(' | ');
+}
+
+

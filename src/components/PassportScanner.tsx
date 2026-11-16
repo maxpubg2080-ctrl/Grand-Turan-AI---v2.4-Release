@@ -63,8 +63,12 @@ export const PassportScanner: React.FC<PassportScannerProps> = ({
         el.src = rawBase64;
       });
 
+      if (!img.naturalWidth || !img.naturalHeight) {
+        return { base64: rawBase64, mimeType: file.type || 'image/jpeg' };
+      }
+
       const maxDim = 1600;
-      const scale = Math.min(1, maxDim / Math.max(img.naturalWidth || 1, img.naturalHeight || 1));
+      const scale = Math.min(1, maxDim / Math.max(img.naturalWidth, img.naturalHeight));
       const targetW = Math.max(1, Math.round(img.naturalWidth * scale));
       const targetH = Math.max(1, Math.round(img.naturalHeight * scale));
 

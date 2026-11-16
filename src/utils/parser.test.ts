@@ -17,6 +17,8 @@ import {
   collectProviderKeys,
   rotateProviderKeys,
   interleaveProviderQueues,
+  extractJsonObjectString,
+  summarizeProviderErrors,
 } from './aiProviders';
 import { PassportRecord } from '../types/passport';
 
@@ -338,5 +340,35 @@ test('interleaveProviderQueues prioritizes 1 attempt per fast provider before re
     'gemini-3',
   ]);
 });
+
+test('extractJsonObjectString extracts balanced JSON even with surrounding prose and markdown fences', () => {
+  const proseWrapped =
+    'Here is the extracted passport data:\n```json\n{"surname": "KARIMOV", "givenNames": "SARDOR", "rawMrz": "P<UZB{TEST}"}\n```\nPlease verify.';
+  const extracted = extractJsonObjectString(proseWrapped);
+  const parsed = JSON.parse(extracted);
+  assert.equal(parsed.surname, 'KARIMOV');
+  assert.equal(parsed.givenNames, 'SARDOR');
+  assert.equal(parsed.rawMrz, 'P<UZB{TEST}');
+
+  const bareProse = 'Output: {"series": "FA", "number": "1234567"} done.';
+  assert.deepEqual(JSON.parse(extractJsonObjectString(bareProse)), {
+    series: 'FA',
+    number: '1234567',
+  });
+});
+
+test('summarizeProviderErrors keeps the first error per provider in concise order', () => {
+  const summary = summarizeProviderErrors([
+    { provider: 'Gemini', detail: '429 quota exceeded' },
+    { provider: 'Gemini', detail: 'timeout 12s' },
+    { provider: 'Groq', detail: '401 invalid api key' },
+    { provider: 'GitHub', detail: '403 models permission required' },
+  ]);
+  assert.equal(
+    summary,
+    'Gemini: 429 quota exceeded | Groq: 401 invalid api key | GitHub: 403 models permission required'
+  );
+});
+
 
 
